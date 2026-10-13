@@ -3,7 +3,9 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<meta name="theme-color" content="#2f5d50">
+<meta name="theme-color" content="#8e1b2c">
+<link rel="icon" type="image/png" href="__FAV__">
+<link rel="apple-touch-icon" sizes="180x180" href="__TOUCH__">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="묵상이음">
 <title>묵상이음</title>
@@ -25,6 +27,14 @@ html,body{margin:0;padding:0}
    그 경우 설교이음 계정으로 그대로 로그인할 수 있습니다.            */
 const SUPABASE_URL = "https://bnfjpkbpjbkuaidysclq.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_yeMSSGWEb8G_SebUwf4r1Q_swsWOKW0";
+/* 오늘의 말씀을 올릴 수 있는 관리자 이메일 (SQL 파일의 이메일과 같아야 합니다) */
+const ADMIN_EMAIL = "romoo2@hanmail.net";
+const BIBLE_SOURCE = "성경전서 개역개정판 © 대한성서공회";
+const APP_VERSION = "1.0.0";
+/* 그림 (대문 배경 · 로고 · 작은 상징) */
+const LANDING_BG = "__BG__";
+const LOGO_IMG = "__LOGO__";
+const SYMBOL_IMG = "__SYMBOL__";
 /* ═══════════════════════════════════════════════════════════════ */
 const sb = (SUPABASE_URL && SUPABASE_ANON_KEY && window.supabase)
   ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
@@ -55,6 +65,17 @@ const BOOK_NAMES = [...OT_BOOKS, ...NT_BOOKS];
 
 /* ── 도우미 ── */
 const today = () => new Date().toLocaleDateString("sv-SE"); /* YYYY-MM-DD (현지 시간) */
+const shiftDate = (ymd, n) => {
+  const [y, m, d] = ymd.split("-").map(Number);
+  const t = new Date(y, m - 1, d + n);
+  return t.toLocaleDateString("sv-SE");
+};
+const DOW = ["일", "월", "화", "수", "목", "금", "토"];
+const prettyDate = (ymd) => {
+  if (!ymd) return "";
+  const [y, m, d] = ymd.split("-").map(Number);
+  return `${y}년 ${m}월 ${d}일 (${DOW[new Date(y, m - 1, d).getDay()]})`;
+};
 const cleanText = (s) => String(s == null ? "" : s)
   .replace(/\u0000/g, "").replace(/[\u0001-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
 
@@ -78,6 +99,7 @@ function rowFrom(r, scope, authorName) {
     apply: cleanText(r.apply),
     prayer: cleanText(r.prayer),
     tags: Array.isArray(r.tags) ? r.tags.map(cleanText).filter(Boolean) : [],
+    word_id: r.wordId || null,
   };
 }
 function recFrom(row, myId) {
@@ -96,13 +118,15 @@ function recFrom(row, myId) {
     prayer: row.prayer || "",
     tags: Array.isArray(row.tags) ? row.tags : [],
     createdAt: row.created_at || "",
+    wordId: row.word_id || null,
   };
 }
 
 const EMPTY_FORM = {
   title: "", date: "", book: "", ref: "", verse: "",
-  content: "", apply: "", prayer: "", tags: "",
+  content: "", apply: "", prayer: "", tags: "", wordId: null,
 };
+const EMPTY_WORD = { id: null, date: "", book: "", ref: "", verse: "", guide: "" };
 
 /* ── 로고 (책 + 잎) ── */
 function Mark({ size = 36 }) {
@@ -299,7 +323,14 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
   const [msg, setMsg] = useState("");
 
   const [library, setLibrary] = useState("personal"); /* personal = 내 묵상, shared = 함께 나눔 */
-  const [view, setView] = useState("list");           /* list | form | map | topics */
+  const [view, setView] = useState("today");          /* today | list | form | map | topics */
+
+  /* ── 오늘의 말씀 ── */
+  const isAdmin = (user.email || "").toLowerCase().trim() === ADMIN_EMAIL.toLowerCase().trim();
+  const [words, setWords] = useState([]);
+  const [wordDate, setWordDate] = useState(today());
+  const [wordForm, setWordForm] = useState(null);   /* null이면 관리자 입력창 닫힘 */
+  const [wordErr, setWordErr] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
 
   const [editingId, setEditingId] = useState(null);
@@ -322,7 +353,57 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
     setItems((data || []).map((row) => recFrom(row, user.id)));
     const a = await sb.from("meditation_amens").select("meditation_id,user_id");
     if (!a.error) setAmens(a.data || []);
+    const w = await sb.from("daily_words").select("*").order("date", { ascending: false });
+    if (w.error) {
+      setWordErr(/relation|does not exist|schema cache/i.test(w.error.message || "")
+        ? "오늘의 말씀 표가 아직 없습니다. Supabase SQL Editor에서 '묵상이음-오늘의말씀.sql'을 실행해 주세요."
+        : "오늘의 말씀을 불러오지 못했습니다 — " + w.error.message);
+    } else { setWords(w.data || []); setWordErr(""); }
     setErr("");
+  };
+
+  const wordOf = (date) => words.find((w) => w.date === date) || null;
+  const wordLabel = (w) => w ? `${w.book}${w.ref ? " " + w.ref : ""}` : "";
+  const currentWord = wordOf(wordDate);
+
+  /* 오늘의 말씀으로 묵상 쓰기 (이미 쓴 묵상이 있으면 그것을 고치기) */
+  const startFromWord = (w) => {
+    const mineOnWord = items.find((x) => x.mine && x.wordId === w.id);
+    if (mineOnWord) { startEdit(mineOnWord); return; }
+    setForm({ ...EMPTY_FORM, date: today(), book: w.book, ref: w.ref, verse: w.verse, wordId: w.id });
+    setEditingId(null);
+    setSaveScope("shared");
+    setView("form");
+  };
+
+  /* 관리자: 말씀 저장 / 삭제 */
+  const saveWord = async () => {
+    const f = wordForm;
+    if (!f.date || !f.book || !f.verse.trim()) { setWordErr("날짜·성경·말씀은 꼭 채워 주세요."); return; }
+    const row = {
+      date: f.date, book: cleanText(f.book), ref: cleanText(f.ref).trim(),
+      verse: cleanText(f.verse).trim(), guide: cleanText(f.guide).trim(),
+    };
+    const res = f.id
+      ? await sb.from("daily_words").update(row).eq("id", f.id).select()
+      : await sb.from("daily_words").insert([row]).select();
+    if (res.error || !res.data || !res.data.length) {
+      const m = res.error ? res.error.message : "";
+      setWordErr(/duplicate|unique/i.test(m) ? "그 날짜에는 이미 말씀이 있습니다. 해당 날짜로 가서 '수정'을 눌러 주세요."
+        : /row-level|permission|policy/i.test(m) ? "관리자 권한이 없습니다. SQL의 관리자 이메일을 확인해 주세요."
+        : "저장 실패 — " + (m || "알 수 없는 오류"));
+      return;
+    }
+    const saved = res.data[0];
+    setWords((p) => [saved, ...p.filter((x) => x.id !== saved.id)].sort((a, b) => b.date.localeCompare(a.date)));
+    setWordDate(saved.date);
+    setWordForm(null); setWordErr("");
+  };
+  const deleteWord = async (w) => {
+    if (!window.confirm(`${prettyDate(w.date)} 말씀을 삭제할까요? 이 말씀으로 쓴 묵상은 남습니다.`)) return;
+    const { error } = await sb.from("daily_words").delete().eq("id", w.id);
+    if (error) { setWordErr("삭제 실패 — " + error.message); return; }
+    setWords((p) => p.filter((x) => x.id !== w.id));
   };
   useEffect(() => { fetchAll().then(() => setLoaded(true)); }, []);
 
@@ -402,7 +483,7 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
     setErr("");
     setLibrary(saveScope === "shared" && library === "shared" ? "shared" : "personal");
     setOpenId(saved.id);
-    setView("list");
+    setView(saved.wordId ? "today" : "list");
   };
   const remove = async (id) => {
     const { error } = await sb.from("meditations").delete().eq("id", id);
@@ -528,7 +609,10 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
 
           {menuOpen && (
             <div className="shelf-menu">
-              <button onClick={() => { setMenuOpen(false); startNew(); }}>묵상 쓰기</button>
+              <button onClick={() => { setMenuOpen(false); startNew(); }}>자유 묵상 쓰기</button>
+              {isAdmin && (
+                <button onClick={() => { setMenuOpen(false); setView("today"); setWordForm({ ...EMPTY_WORD, date: wordDate }); }}>말씀 올리기</button>
+              )}
               <button onClick={() => { setMenuOpen(false); exportData(); }} disabled={!stats.total}>백업</button>
               <button onClick={() => { setMenuOpen(false); document.getElementById("import-input").click(); }}>가져오기</button>
               <button onClick={() => { setMenuOpen(false); fetchAll(); }}>새로 불러오기</button>
@@ -537,25 +621,156 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
           <input id="import-input" type="file" accept=".json" hidden onChange={importData} />
 
           <nav className="tabs">
+            <button className={view === "today" ? "on" : ""} onClick={() => { setWordDate(today()); setView("today"); }}>오늘의 말씀</button>
             <button className={view === "list" ? "on" : ""} onClick={() => setView("list")}>묵상</button>
             <button className={view === "map" ? "on" : ""} onClick={() => { setMapBook(null); setView("map"); }}>성경 지도</button>
             <button className={view === "topics" ? "on" : ""} onClick={() => { setTopicSel(null); setView("topics"); }}>주제</button>
-            <button className="new-btn" onClick={startNew}>+ 묵상 쓰기</button>
+            <button className="new-btn" onClick={() => { const w = wordOf(today()); if (w) startFromWord(w); else startNew(); }}>+ 묵상 쓰기</button>
             <button className="home-btn" onClick={onHome}>대문</button>
           </nav>
         </div>
       </header>
 
-      <div className="lib-bar">
-        <div className="lib-inner">
-          <button className={library === "personal" ? "on" : ""} onClick={() => setLibrary("personal")}>내 묵상</button>
-          <button className={library === "shared" ? "on" : ""} onClick={() => setLibrary("shared")}>함께 나눔</button>
+      {view !== "today" && view !== "form" && (
+        <div className="lib-bar">
+          <div className="lib-inner">
+            <button className={library === "personal" ? "on" : ""} onClick={() => setLibrary("personal")}>내 묵상</button>
+            <button className={library === "shared" ? "on" : ""} onClick={() => setLibrary("shared")}>함께 나눔</button>
+          </div>
         </div>
-      </div>
+      )}
 
       {err && <div className="banner error">문제가 생겼습니다 — {err}</div>}
       {msg && <div className="banner">{msg}</div>}
       {!loaded && <div className="banner">묵상을 불러오는 중…</div>}
+
+      {/* ───────── 오늘의 말씀 ───────── */}
+      {loaded && view === "today" && (() => {
+        const w = currentWord;
+        const myOnWord = w ? items.find((x) => x.mine && x.wordId === w.id) : null;
+        const sharedOnWord = w ? items.filter((x) => x.scope === "shared" && x.wordId === w.id) : [];
+        const isToday = wordDate === today();
+        return (
+          <main className="container narrow">
+            <div className="day-nav">
+              <button className="ghost" onClick={() => setWordDate(shiftDate(wordDate, -1))} aria-label="전날">◀</button>
+              <div className="day-label">
+                <b>{isToday ? "오늘의 말씀" : "그날의 말씀"}</b>
+                <span>{prettyDate(wordDate)}</span>
+              </div>
+              <button className="ghost" onClick={() => setWordDate(shiftDate(wordDate, 1))} aria-label="다음날">▶</button>
+            </div>
+            {!isToday && (
+              <p className="day-back"><button className="text-link" onClick={() => setWordDate(today())}>오늘로 돌아가기</button></p>
+            )}
+
+            {wordErr && <p className="auth-err" style={{ marginBottom: 14 }}>{wordErr}</p>}
+
+            {w ? (
+              <section className="word-card">
+                <p className="word-ref">{wordLabel(w)}</p>
+                <div className="word-text">{w.verse}</div>
+                <p className="word-source">{BIBLE_SOURCE}</p>
+                {w.guide && (
+                  <div className="word-guide"><b>묵상 도움</b><div>{w.guide}</div></div>
+                )}
+                <button className="primary word-go" onClick={() => startFromWord(w)}>
+                  {myOnWord ? "내 묵상 고치기" : "이 말씀으로 묵상하기"}
+                </button>
+                {isAdmin && (
+                  <div className="word-admin">
+                    <button className="ghost" onClick={() => setWordForm({ ...EMPTY_WORD, ...w, guide: w.guide || "" })}>말씀 수정</button>
+                    <button className="ghost danger-text" onClick={() => deleteWord(w)}>말씀 삭제</button>
+                  </div>
+                )}
+              </section>
+            ) : (
+              <div className="empty">
+                <p className="empty-title">이 날에는 아직 말씀이 올라오지 않았습니다.</p>
+                <p>{isAdmin ? "아래 '이 날 말씀 올리기'를 눌러 말씀을 넣어 주세요." : "말씀이 올라오면 이곳에서 함께 묵상할 수 있습니다. 그동안은 메뉴의 '자유 묵상 쓰기'를 이용해 주세요."}</p>
+              </div>
+            )}
+
+            {isAdmin && !w && !wordForm && (
+              <button className="primary" style={{ width: "100%" }} onClick={() => setWordForm({ ...EMPTY_WORD, date: wordDate })}>
+                + 이 날 말씀 올리기
+              </button>
+            )}
+
+            {isAdmin && wordForm && (
+              <section className="word-form">
+                <h3>{wordForm.id ? "말씀 수정" : "말씀 올리기"} <small>관리자</small></h3>
+                <div className="row">
+                  <label className="field"><span>날짜</span>
+                    <input type="date" value={wordForm.date} onChange={(e) => setWordForm({ ...wordForm, date: e.target.value })} />
+                  </label>
+                  <label className="field"><span>성경</span>
+                    <select value={wordForm.book} onChange={(e) => setWordForm({ ...wordForm, book: e.target.value })}>
+                      <option value="">선택</option>
+                      <optgroup label="구약">{OT_BOOKS.map((b) => <option key={b}>{b}</option>)}</optgroup>
+                      <optgroup label="신약">{NT_BOOKS.map((b) => <option key={b}>{b}</option>)}</optgroup>
+                    </select>
+                  </label>
+                  <label className="field"><span>장·절</span>
+                    <input value={wordForm.ref} onChange={(e) => setWordForm({ ...wordForm, ref: e.target.value })} placeholder="예: 23:1-3" />
+                  </label>
+                </div>
+                <label className="field"><span>말씀 (저작권을 위해 몇 절 정도만 넣어 주세요)</span>
+                  <textarea rows={5} value={wordForm.verse} onChange={(e) => setWordForm({ ...wordForm, verse: e.target.value })}
+                    placeholder="여호와는 나의 목자시니 내게 부족함이 없으리로다 …" />
+                </label>
+                <label className="field"><span>묵상 도움 (질문이나 짧은 안내, 비워도 됩니다)</span>
+                  <textarea rows={3} value={wordForm.guide} onChange={(e) => setWordForm({ ...wordForm, guide: e.target.value })}
+                    placeholder="예: 오늘 나에게 '부족함'으로 느껴지는 것은 무엇인가요?" />
+                </label>
+                <div className="form-actions">
+                  <button className="primary" onClick={saveWord}>{wordForm.id ? "수정 저장" : "말씀 올리기"}</button>
+                  <button className="ghost" onClick={() => { setWordForm(null); setWordErr(""); }}>취소</button>
+                </div>
+              </section>
+            )}
+
+            {w && (
+              <section className="word-shared">
+                <h3>함께 나눈 묵상 <small>{sharedOnWord.length}편</small></h3>
+                {sharedOnWord.length === 0 ? (
+                  <p className="muted">아직 나눈 묵상이 없습니다. 첫 번째로 받은 은혜를 나눠 주세요.</p>
+                ) : (
+                  <ul className="shared-list">
+                    {sharedOnWord.map((s) => (
+                      <li key={s.id}>
+                        <button onClick={() => { setLibrary("shared"); setQuery(""); setFYear("전체"); setFTag("전체"); setView("list"); setOpenId(s.id); if (!comments[s.id]) loadComments(s.id); }}>
+                          <span className="sh-head">
+                            <b>{s.author || "이름 없음"}</b>
+                            {amenCount(s.id) > 0 && <span className="pill amen">아멘 {amenCount(s.id)}</span>}
+                          </span>
+                          <span className="sh-title">{s.title}</span>
+                          {s.content && <span className="peek">{s.content}</span>}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+            )}
+
+            {isAdmin && words.length > 0 && (
+              <section className="word-shared">
+                <h3>올린 말씀 <small>관리자만 보입니다 · 최근 {Math.min(words.length, 14)}개</small></h3>
+                <ul className="admin-words">
+                  {words.slice(0, 14).map((x) => (
+                    <li key={x.id}>
+                      <button className="link" onClick={() => setWordDate(x.date)}>
+                        <span className="date">{prettyDate(x.date)}</span> <span className="scripture">{wordLabel(x)}</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
+          </main>
+        );
+      })()}
 
       {/* ───────── 묵상 목록 ───────── */}
       {loaded && view === "list" && (
@@ -606,6 +821,7 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
                       {!open && s.content && <span className="peek">{s.content}</span>}
                     </div>
                     <div className="card-meta">
+                      {s.wordId && <span className="pill word">오늘의 말씀</span>}
                       {library === "shared" && <span className="pill author">{s.author || "이름 없음"}</span>}
                       {library === "personal" && s.scope === "shared" && <span className="pill shared">나눔</span>}
                       {s.scope === "shared" && amenCount(s.id) > 0 && <span className="pill amen">아멘 {amenCount(s.id)}</span>}
@@ -615,7 +831,8 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
 
                   {open && (
                     <div className="card-body">
-                      <Section name="말씀" text={s.verse} cls="verse" />
+                      <Section name={s.wordId ? "오늘의 말씀" : "말씀"} text={s.verse} cls="verse" />
+                      {s.verse && <p className="word-source" style={{ marginTop: -6 }}>{BIBLE_SOURCE}</p>}
                       <Section name="묵상" text={s.content} />
                       <Section name="적용" text={s.apply} />
                       <Section name="기도" text={s.prayer} cls="prayer" />
@@ -697,6 +914,17 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
             </label>
           </div>
 
+          {form.wordId && (
+            <div className="word-card compact">
+              <p className="word-ref">오늘의 말씀 · {form.book}{form.ref ? " " + form.ref : ""}</p>
+              <div className="word-text">{form.verse}</div>
+              <p className="word-source">{BIBLE_SOURCE}</p>
+              {(() => { const w = words.find((x) => x.id === form.wordId); return w && w.guide
+                ? <div className="word-guide"><b>묵상 도움</b><div>{w.guide}</div></div> : null; })()}
+            </div>
+          )}
+
+          {!form.wordId && (<>
           <div className="row">
             <label className="field"><span>본문 성경</span>
               <select value={form.book} onChange={(e) => setForm({ ...form, book: e.target.value })}>
@@ -710,12 +938,14 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
             </label>
           </div>
 
-          <label className="field"><span>제목 (비우면 본문 말씀으로 채워집니다)</span>
-            <input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="예: 부족함이 없는 삶" />
-          </label>
-          <label className="field"><span>붙잡은 말씀</span>
+          <label className="field"><span>붙잡은 말씀 (마음에 머문 한두 절 정도만 적어 주세요)</span>
             <textarea rows={3} value={form.verse} onChange={(e) => setForm({ ...form, verse: e.target.value })}
               placeholder="오늘 마음에 머문 구절을 적어 보세요." />
+          </label>
+          </>)}
+
+          <label className="field"><span>제목 (비우면 본문 말씀으로 채워집니다)</span>
+            <input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="예: 부족함이 없는 삶" />
           </label>
           <label className="field"><span>묵상 — 말씀이 내게 하신 말씀</span>
             <textarea rows={8} value={form.content} onChange={(e) => setForm({ ...form, content: e.target.value })}
@@ -735,7 +965,7 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
             <button className="primary" disabled={!form.content.trim() && !form.title.trim()} onClick={saveForm}>
               {editingId ? "수정 저장" : "저장"}
             </button>
-            <button className="ghost" onClick={() => setView("list")}>취소</button>
+            <button className="ghost" onClick={() => setView(form.wordId ? "today" : "list")}>취소</button>
           </div>
         </main>
       )}
@@ -893,6 +1123,41 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 .pill.shared{background:#e3ece8;color:#2f5d50;font-weight:700}
 .pill.amen{background:#fdf1dc;color:#916218}
 .date{font-size:13px;color:var(--muted);white-space:nowrap}
+.pill.word{background:#2f5d50;color:#fff}
+
+/* 오늘의 말씀 */
+.day-nav{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px}
+.day-nav button.ghost{width:44px;height:44px;border-radius:22px;font-size:14px;background:var(--card)}
+.day-label{text-align:center}
+.day-label b{display:block;font-family:'Noto Serif KR',serif;font-size:20px;color:var(--ink-deep)}
+.day-label span{font-size:13px;color:var(--muted)}
+.day-back{text-align:center;margin-bottom:8px}
+.word-card{margin:14px 0 18px;padding:24px 22px;border-radius:18px;text-align:center;
+  background:linear-gradient(160deg,#fffdf6,#f2efe3);border:1px solid #e6dcc3;
+  box-shadow:0 10px 24px rgba(31,61,53,.10)}
+.word-card.compact{margin:16px 0 4px;padding:16px 18px;text-align:left;box-shadow:none}
+.word-ref{font-family:'Noto Serif KR',serif;font-weight:700;color:var(--accent);font-size:15px;margin-bottom:12px}
+.word-text{font-family:'Noto Serif KR',serif;font-size:18px;line-height:1.95;white-space:pre-wrap;color:var(--ink-deep)}
+.word-card.compact .word-text{font-size:15.5px;line-height:1.8}
+.word-source{font-size:11.5px;color:#9a9887;margin-top:10px}
+.word-guide{margin-top:16px;padding:12px 14px;border-radius:10px;background:#fff;border:1px dashed #d8cba4;text-align:left}
+.word-guide b{display:block;font-size:12px;color:var(--accent);margin-bottom:4px}
+.word-guide div{font-size:14.5px;line-height:1.75;white-space:pre-wrap}
+.word-go{margin-top:20px;width:100%;max-width:320px}
+.word-admin{display:flex;gap:8px;justify-content:center;margin-top:12px}
+.word-form{margin:16px 0;padding:16px 18px;background:var(--card);border:1.5px dashed var(--accent);border-radius:14px}
+.word-form h3,.word-shared h3{font-family:'Noto Serif KR',serif;font-size:17px}
+.word-form h3 small,.word-shared h3 small{font-size:12.5px;color:var(--muted);font-weight:400;margin-left:6px}
+.word-shared{margin-top:22px}
+.word-shared h3{margin-bottom:10px}
+.shared-list{list-style:none;display:flex;flex-direction:column;gap:8px}
+.shared-list button{width:100%;text-align:left;background:var(--card);border:1px solid var(--line);border-radius:12px;
+  padding:12px 14px;display:flex;flex-direction:column;gap:4px}
+.shared-list button:hover{border-color:var(--green)}
+.sh-head{display:flex;gap:8px;align-items:center}
+.sh-head b{color:var(--green);font-size:13.5px}
+.sh-title{font-weight:700;font-size:15px;color:var(--ink)}
+.admin-words{list-style:none}
 .card-body{border-top:1px dashed var(--line);padding:14px 16px 16px;display:flex;flex-direction:column;gap:12px}
 .med-sec b{display:block;font-size:12px;color:var(--accent);margin-bottom:4px}
 .med-sec div{white-space:pre-wrap;font-size:14.5px;line-height:1.8}
@@ -989,6 +1254,7 @@ button.link:hover{text-decoration:underline}
 
 @media (max-width:640px){
   .tabs{display:grid;grid-template-columns:repeat(3,1fr)}
+  .word-text{font-size:16.5px}
   .tabs button{padding:8px 4px;font-size:12.5px}
   .tabs .home-btn{margin-left:0}
   .row{flex-direction:column;gap:0}
