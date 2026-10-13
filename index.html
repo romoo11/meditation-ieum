@@ -52,8 +52,8 @@ const BIBLE_SECTIONS = [
         "오바댜","요나","미가","나훔","하박국","스바냐","학개","스가랴","말라기"] },
   ]},
   { testament: "신약", groups: [
-    { name: "복음서·사도행전", books: ["마태복음","마가복음","누가복음","요한복음","사도행전"] },
-    { name: "서신서", books: ["로마서","고린도전서","고린도후서","갈라디아서","에베소서","빌립보서",
+    { name: "역사서 (복음서·사도행전)", books: ["마태복음","마가복음","누가복음","요한복음","사도행전"] },
+    { name: "지혜서 (로마서~유다서)", books: ["로마서","고린도전서","고린도후서","갈라디아서","에베소서","빌립보서",
         "골로새서","데살로니가전서","데살로니가후서","디모데전서","디모데후서","디도서","빌레몬서",
         "히브리서","야고보서","베드로전서","베드로후서","요한일서","요한이서","요한삼서","유다서"] },
     { name: "예언서", books: ["요한계시록"] },
@@ -150,7 +150,67 @@ const STEPS = [
 ];
 const Q_GOD = "말씀에서 하나님은 어떤 분인가요?";
 const Q_ME = "오늘 내게 주시는 말씀은 무엇인가요?";
-const EMPTY_DRAFT = { answers: ["", ""], apply: "", prayer: "", content: "", highlights: [], scope: "personal", done: false };
+/* ── 성경 갈래별 묵상 질문 (역사서 · 지혜서 · 예언서) ── */
+const GENRES = {
+  history: {
+    name: "역사서",
+    hint: "사건과 인물을 따라가며 그 안에서 일하시는 하나님을 봅니다.",
+    qs: [
+      "오늘 말씀은 어떤 상황과 배경 속에서 일어난 사건입니까?",
+      "오늘 말씀에 등장하는 주요 인물은 누구입니까?",
+      "각 인물의 말과 행동, 선택에서 드러나는 특징은 무엇입니까?",
+      "이 인물들과 사건을 통해 하나님은 무엇을 보여 주십니까?",
+      "나는 오늘 말씀 속에서 어떤 인물의 모습과 가장 가까운 자리에 서 있습니까?",
+      "이 말씀을 통해 오늘 나에게 주시는 하나님의 말씀은 무엇입니까?",
+    ],
+  },
+  wisdom: {
+    name: "지혜서",
+    hint: "마음에 머무는 말씀을 붙들고 삶의 태도와 지혜를 돌아봅니다.",
+    qs: [
+      "오늘 말씀에서 마음에 머무는 구절이나 표현은 무엇입니까?",
+      "그 말씀은 삶의 어떤 태도와 지혜를 가르치고 있습니까?",
+      "오늘 말씀에서 따라야 할 삶의 모습과 경계해야 할 모습은 무엇입니까?",
+      "이 말씀을 통해 하나님께서 기뻐하시는 삶의 기준은 무엇입니까?",
+      "지금 나의 생각과 말과 행동 가운데 이 말씀에 비추어 돌아보아야 할 것은 무엇입니까?",
+      "오늘 이 말씀을 내 삶에서 어떻게 실천할 수 있습니까?",
+    ],
+  },
+  prophecy: {
+    name: "예언서",
+    hint: "선포된 말씀 앞에서 돌이킴과 회복의 부르심을 듣습니다.",
+    qs: [
+      "오늘 말씀은 누구에게, 어떤 상황 속에서 선포된 말씀입니까?",
+      "하나님께서 책망하시거나 바로잡으시는 것은 무엇입니까?",
+      "하나님께서 백성에게 돌이키라고 요구하시는 것은 무엇입니까?",
+      "심판이나 경고 가운데서도 하나님께서 약속하시는 회복과 소망은 무엇입니까?",
+      "오늘 말씀에 비추어 볼 때 내가 돌이키거나 새롭게 해야 할 부분은 무엇입니까?",
+      "이 말씀을 통해 오늘 나에게 주시는 하나님의 부르심은 무엇입니까?",
+    ],
+  },
+};
+/* 성경 이름 → 갈래 (성경 지도의 갈래 이름을 그대로 따름) */
+function genreOf(book) {
+  for (const sec of BIBLE_SECTIONS) for (const g of sec.groups) {
+    if (g.books.includes(book)) {
+      if (g.name.startsWith("지혜서")) return "wisdom";
+      if (g.name.startsWith("예언서")) return "prophecy";
+      return "history";
+    }
+  }
+  return "history";
+}
+const NUM = ["①", "②", "③", "④", "⑤", "⑥"];
+/* 기록에 맞는 질문 목록 (예전 두 질문 기록도 그대로 보여 줌) */
+const questionsFor = (book, answers) =>
+  (answers && answers.length === 2) ? [Q_GOD, Q_ME] : GENRES[genreOf(book)].qs;
+/* 카드·나눔에 대표로 보일 답: 마지막(⑥) 답, 없으면 채워진 마지막 답 */
+const mainAnswer = (s) => {
+  const a = (s && s.answers) || [];
+  for (let i = a.length - 1; i >= 0; i--) if (filled(a[i])) return a[i];
+  return "";
+};
+const EMPTY_DRAFT = { answers: ["", "", "", "", "", ""], apply: "", prayer: "", content: "", highlights: [], scope: "personal", done: false };
 
 /* "6 드보라가 … 7 내가 …" → [{n:6, t:"드보라가 …"}, …] (절 번호가 1씩 늘어날 때만 나눔) */
 function splitVerses(text) {
@@ -475,7 +535,7 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
   const openFlow = (w, step = 0) => {
     const rec = myRecFor(w);
     setDraft(rec ? {
-      answers: [(rec.answers || [])[0] || "", (rec.answers || [])[1] || ""],
+      answers: Array.from({ length: Math.max(6, (rec.answers || []).length) }, (_, i) => (rec.answers || [])[i] || ""),
       apply: rec.apply, prayer: rec.prayer, content: rec.content,
       highlights: rec.highlights || [], scope: rec.scope, done: !!rec.done,
     } : { ...EMPTY_DRAFT, ...lsGet("med-draft-" + w.id, {}) });
@@ -843,7 +903,7 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
 
             {w ? (
               <section className="today-card">
-                <p className="today-ref">{wordLabel(w)}</p>
+                <p className="today-ref">{wordLabel(w)} <span className={"genre-chip sm g-" + genreOf(w.book)}>{GENRES[genreOf(w.book)].name}</span></p>
                 <h2 className="today-title">{w.title || wordLabel(w)}</h2>
                 {w.key_verse && <blockquote className="today-key">{cleanVerse(w.key_verse)}</blockquote>}
 
@@ -899,6 +959,11 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
                   </label>
                   {wordFormField("ref", "장·절", { ph: "예: 4:1-10" })}
                 </div>
+                {wordForm.book && (
+                  <p className="form-hint" style={{ marginTop: 8 }}>
+                    {wordForm.book}은(는) <b>{GENRES[genreOf(wordForm.book)].name}</b>입니다 — 성도에게 {GENRES[genreOf(wordForm.book)].name} 묵상 질문 6개가 나옵니다.
+                  </p>
+                )}
                 {wordFormField("title", "제목", { ph: "예: 함께 가시면 가겠나이다" })}
                 {wordFormField("verse", "① 오늘의 본문 (절 번호를 앞에 붙이면 한 절씩 나뉘어 보입니다)", { rows: 6, ph: "6 드보라가 사람을 보내어 … 7 내가 야빈의 군대 장관 …" })}
                 {wordFormField("background", "② 본문 배경", { rows: 3, ph: "이 본문이 쓰인 때와 상황" })}
@@ -928,7 +993,7 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
                             <b>{s.author || "이름 없음"}</b>
                             {amenCount(s.id) > 0 && <span className="pill amen">아멘 {amenCount(s.id)}</span>}
                           </span>
-                          {filled((s.answers || [])[1]) && <span className="sh-title">{s.answers[1]}</span>}
+                          {filled(mainAnswer(s)) && <span className="sh-title">{mainAnswer(s)}</span>}
                           {filled(s.apply) && <span className="peek">적용 · {s.apply}</span>}
                         </button>
                       </li>
@@ -1047,16 +1112,29 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
                   </section>
                 )}
                 {filled(w.guide) && <section className="guide-card"><b>묵상 도움</b><p>{w.guide}</p></section>}
-                {[Q_GOD, Q_ME].map((q, i) => (
-                  <section className="q-card" key={i}>
-                    <label>
-                      <span className="q-num">{i + 1}</span>
-                      <span className="q-text">{q}</span>
-                    </label>
-                    <textarea rows={5} value={draft.answers[i]} placeholder={i === 0 ? "예: 약속을 미리 말씀해 주시는 신실하신 분" : "예: 조건을 내려놓고 말씀 하나로 움직이라"}
-                      onChange={(e) => { const a = [...draft.answers]; a[i] = e.target.value; upd({ answers: a }); }} />
-                  </section>
-                ))}
+                {(() => {
+                  const g = GENRES[genreOf(w.book)];
+                  const qs = g.qs;
+                  const doneN = qs.filter((_, i) => filled(draft.answers[i])).length;
+                  return (<>
+                    <div className="genre-head">
+                      <span className={"genre-chip g-" + genreOf(w.book)}>{g.name} 묵상</span>
+                      <span className="genre-count">{doneN} / {qs.length}</span>
+                      <p>{g.hint}</p>
+                    </div>
+                    {qs.map((q, i) => (
+                      <section className={"q-card" + (i === qs.length - 1 ? " q-last" : "")} key={i}>
+                        <label>
+                          <span className={"q-num" + (filled(draft.answers[i]) ? " ok" : "")}>{filled(draft.answers[i]) ? "✓" : i + 1}</span>
+                          <span className="q-text">{q}</span>
+                        </label>
+                        <textarea rows={i === qs.length - 1 ? 4 : 3} value={draft.answers[i] || ""}
+                          placeholder={i === qs.length - 1 ? "오늘 붙들 한 말씀을 적어 보세요." : "떠오르는 대로 짧게 적어도 좋습니다."}
+                          onChange={(e) => { const a = [...draft.answers]; while (a.length < qs.length) a.push(""); a[i] = e.target.value; upd({ answers: a }); }} />
+                      </section>
+                    ))}
+                  </>);
+                })()}
               </>
             )}
 
@@ -1237,7 +1315,7 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
                     <div className="card-main">
                       <span className="scripture">{label(s)}</span>
                       <span className="card-title">{s.title}</span>
-                      {!open && (filled((s.answers || [])[1]) || s.content) && <span className="peek">{filled((s.answers || [])[1]) ? s.answers[1] : s.content}</span>}
+                      {!open && (filled(mainAnswer(s)) || s.content) && <span className="peek">{filled(mainAnswer(s)) ? mainAnswer(s) : s.content}</span>}
                     </div>
                     <div className="card-meta">
                       {s.wordId && <span className="pill word">{s.done ? "묵상 완료" : "묵상 중"}</span>}
@@ -1251,8 +1329,9 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
                   {open && (
                     <div className="card-body">
                       {s.wordId ? (<>
-                        <Section name={Q_GOD} text={(s.answers || [])[0]} />
-                        <Section name={Q_ME} text={(s.answers || [])[1]} />
+                        {questionsFor(s.book, s.answers).map((q, i) => (
+                          <Section key={i} name={(NUM[i] || "") + " " + q} text={(s.answers || [])[i]} />
+                        ))}
                         <Section name="오늘 실천할 한 가지" text={s.apply} cls="verse" />
                         <Section name="나의 기도" text={s.prayer} cls="prayer" />
                         <Section name="묵상노트" text={s.content} />
@@ -1776,6 +1855,19 @@ button.link:hover{text-decoration:underline}
   .flow-title{font-size:21px}
   .cal-num{font-size:13px}
 }
+
+/* 갈래별 묵상 질문 */
+.genre-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:12px}
+.genre-head p{flex-basis:100%;font-size:13.5px;color:var(--muted);line-height:1.6}
+.genre-count{margin-left:auto;font-size:12.5px;color:var(--muted);font-weight:700}
+.genre-chip{display:inline-block;font-family:'Noto Sans KR',sans-serif;font-size:12.5px;font-weight:700;padding:4px 11px;border-radius:14px;letter-spacing:0}
+.genre-chip.sm{font-size:11px;padding:2px 8px;margin-left:6px;vertical-align:2px}
+.genre-chip.g-history{background:#f6e3e6;color:#8e1b2c}
+.genre-chip.g-wisdom{background:#e8efe6;color:#3f6a3a}
+.genre-chip.g-prophecy{background:#e6e9f3;color:#3a4f86}
+.q-card .q-num.ok{background:#3f8a55}
+.q-card.q-last{border-color:#e2bcc2;background:linear-gradient(#fff,#fff7f7)}
+.q-card .q-text{font-size:16px}
 
 /* 대문 */
 .landing{position:relative;min-height:100vh;overflow:hidden;display:flex;flex-direction:column;align-items:center;justify-content:center;
