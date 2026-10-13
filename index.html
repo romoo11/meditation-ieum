@@ -136,7 +136,7 @@ const EMPTY_FORM = {
 };
 const EMPTY_WORD = {
   id: null, date: "", title: "", book: "", ref: "", verse: "",
-  background: "", commentary: "", key_verse: "", guide: "", prayer: "",
+  background: "", commentary: "", key_verse: "", guide: "", qs: "", prayer: "",
 };
 
 /* ── 묵상 흐름: 읽기 → 이해 → 묵상 → 적용 → 기도 → 노트 ── */
@@ -202,8 +202,31 @@ function genreOf(book) {
 }
 const NUM = ["①", "②", "③", "④", "⑤", "⑥"];
 /* 기록에 맞는 질문 목록 (예전 두 질문 기록도 그대로 보여 줌) */
-const questionsFor = (book, answers) =>
-  (answers && answers.length === 2) ? [Q_GOD, Q_ME] : GENRES[genreOf(book)].qs;
+/* 교재 질문: 말씀의 guide 안 '교재 묵상 질문' 묶음에 한 줄씩 저장 (따로 SQL 칸 없이) */
+const QS_HEAD = /^(교재\s*묵상\s*질문|묵상\s*질문|오늘의\s*질문)\s*:?\s*/;
+function bookQs(guide) {
+  const out = [];
+  String(guide || "").split(/\n\s*\n/).map((b) => b.trim()).filter((b) => QS_HEAD.test(b)).forEach((b) => {
+    b.replace(QS_HEAD, "").split(/\n/).map((l) => l.replace(/^\s*(\d+[.)]|[①-⑳]|[-•·])\s*/, "").trim()).filter(Boolean).forEach((l) => out.push(l));
+  });
+  return out.slice(0, 6);
+}
+const qsLines = (t) => String(t || "").split(/\n/).map((l) => l.replace(/^\s*(\d+[.)]|[①-⑳]|[-•·])\s*/, "").trim()).filter(Boolean).slice(0, 6);
+function composeGuide(step, qsText) {
+  const qs = qsLines(qsText);
+  const parts = [];
+  if (filled(step)) parts.push(String(step).trim());
+  if (qs.length) parts.push("교재 묵상 질문\n" + qs.map((q, i) => `${i + 1}. ${q}`).join("\n"));
+  return parts.join("\n\n");
+}
+/* 그날 말씀의 묵상 질문: 교재 질문이 있으면 그것, 없으면 갈래별 6문항 */
+const wordQuestions = (w) => {
+  const bq = w ? bookQs(w.guide) : [];
+  return bq.length ? bq : GENRES[genreOf(w && w.book)].qs;
+};
+/* 기록에 맞는 질문 목록 (예전 두 질문 기록도 그대로 보여 줌) */
+const questionsFor = (book, answers, w) =>
+  (answers && answers.length === 2) ? [Q_GOD, Q_ME] : (w ? wordQuestions(w) : GENRES[genreOf(book)].qs);
 /* 카드·나눔에 대표로 보일 답: 마지막(⑥) 답, 없으면 채워진 마지막 답 */
 const mainAnswer = (s) => {
   const a = (s && s.answers) || [];
@@ -235,6 +258,13 @@ function splitVerses(text) {
 const cleanVerse = (t) => String(t || "").replace(/\s*\(개역개정\)\s*/g, " ").trim();
 const parasOf = (t) => String(t || "").split(/\n\s*\n|\n/).map((s) => s.trim()).filter(Boolean);
 const filled = (s) => !!String(s || "").trim();
+/* 적용 도움: 질문 묶음(교재 묵상 질문·오늘의 질문)은 빼고 실천 안내만 남김 — 묵상 질문은 갈래별 6문항으로 하나만 보이게 */
+function applyHint(guide) {
+  const blocks = String(guide || "").split(/\n\s*\n/).map((b) => b.trim()).filter(Boolean)
+    .filter((b) => !/^(교재\s*묵상\s*질문|오늘의\s*질문)/.test(b))
+    .map((b) => b.replace(/^오늘의\s*한\s*걸음\s*\n?/, "").trim());
+  return blocks.filter(Boolean).join("\n\n");
+}
 
 /* 단계별로 채웠는지 */
 function stepDone(rec, k) {
@@ -242,7 +272,7 @@ function stepDone(rec, k) {
   const a = rec.answers || [];
   if (k === "read") return true;
   if (k === "understand") return true;
-  if (k === "meditate") return filled(a[0]) || filled(a[1]);
+  if (k === "meditate") return a.some(filled);
   if (k === "apply") return filled(rec.apply);
   if (k === "pray") return filled(rec.prayer);
   if (k === "note") return filled(rec.content) || !!rec.done;
@@ -503,13 +533,13 @@ function devoToEntries(d, monday) {
   const title = d.title || "";
   const out = [];
   if (filled(d.qt.text) || filled(d.qt.look)) {
-    const qs = (d.qt.questions || []).map((q, i) => `${i + 1}. ${q}`).join("\n");
     out.push({
       key: "qt", label: "개인 묵상(QT)", on: true, off: -1, date: shiftDate(monday, -1),
       title, book, ref: refFromText(d.qt.text, chap),
       verse: cleanVerse(d.qt.text), background: d.essay ? parasOf(d.essay)[0] || "" : "",
       commentary: d.qt.look, key_verse: "",
-      guide: [qs && "교재 묵상 질문\n" + qs, filled(d.qt.step) && "오늘의 한 걸음\n" + d.qt.step].filter(Boolean).join("\n\n"),
+      guide: filled(d.qt.step) ? d.qt.step : "",
+      qs: (d.qt.questions || []).join("\n"),
       prayer: d.qt.prayer,
     });
   }
@@ -521,7 +551,8 @@ function devoToEntries(d, monday) {
       title, book, ref: refFromText(x.text, chap),
       verse: cleanVerse(x.text), background: "", commentary: x.body,
       key_verse: cleanVerse(x.text),
-      guide: filled(x.question) ? "오늘의 질문\n" + x.question : "",
+      guide: "",
+      qs: x.question || "",
       prayer: x.prayer,
     });
   });
@@ -857,7 +888,7 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
     const row = {
       date: f.date, title: t(f.title), book: t(f.book), ref: t(f.ref), verse: t(f.verse),
       background: t(f.background), commentary: t(f.commentary), key_verse: t(f.key_verse),
-      guide: t(f.guide), prayer: t(f.prayer),
+      guide: composeGuide(t(f.guide), t(f.qs)), prayer: t(f.prayer),
     };
     const res = f.id
       ? await sb.from("daily_words").update(row).eq("id", f.id).select()
@@ -916,7 +947,7 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
       if (!e.date || !e.book || !filled(e.verse)) { skipped++; if (!fail) fail = `${e.label}: 날짜·성경·본문이 비어 있어 건너뜀`; continue; }
       const t = (v) => cleanText(v).trim();
       const row = { date: e.date, title: t(e.title), book: t(e.book), ref: t(e.ref), verse: t(e.verse),
-        background: t(e.background), commentary: t(e.commentary), key_verse: t(e.key_verse), guide: t(e.guide), prayer: t(e.prayer) };
+        background: t(e.background), commentary: t(e.commentary), key_verse: t(e.key_verse), guide: composeGuide(t(e.guide), t(e.qs)), prayer: t(e.prayer) };
       const old = wordOf(e.date);
       if (old && !e.overwrite) { skipped++; continue; }
       const res = old
@@ -1239,7 +1270,7 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
 
                 {isAdmin && (
                   <div className="word-admin">
-                    <button className="ghost" onClick={() => setWordForm({ ...EMPTY_WORD, ...w })}>말씀 수정</button>
+                    <button className="ghost" onClick={() => setWordForm({ ...EMPTY_WORD, ...w, guide: applyHint(w.guide), qs: bookQs(w.guide).join("\n") })}>말씀 수정</button>
                     <button className="ghost danger-text" onClick={() => deleteWord(w)}>말씀 삭제</button>
                   </div>
                 )}
@@ -1320,7 +1351,8 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
                               {impField(i, e, "background", "② 본문 배경", 3)}
                               {impField(i, e, "commentary", "② 말씀 해설", 5)}
                               {impField(i, e, "key_verse", "② 핵심 구절", 2)}
-                              {impField(i, e, "guide", "③ 묵상 도움", 4)}
+                              {impField(i, e, "qs", "③ 교재 묵상 질문 (한 줄에 하나 — 묵상하기 단계의 질문이 됩니다. 비우면 갈래별 6문항)", 3)}
+                              {impField(i, e, "guide", "④ 오늘의 한 걸음 (적용하기 단계에 보입니다)", 3)}
                               {impField(i, e, "prayer", "⑤ 기도문 예시", 3)}
                             </details>
                           </li>
@@ -1360,7 +1392,7 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
                 </div>
                 {wordForm.book && (
                   <p className="form-hint" style={{ marginTop: 8 }}>
-                    {wordForm.book}은(는) <b>{GENRES[genreOf(wordForm.book)].name}</b>입니다 — 성도에게 {GENRES[genreOf(wordForm.book)].name} 묵상 질문 6개가 나옵니다.
+                    {wordForm.book}은(는) <b>{GENRES[genreOf(wordForm.book)].name}</b>입니다 — {qsLines(wordForm.qs).length ? <>아래 ③에 적은 <b>묵상 질문 {qsLines(wordForm.qs).length}개</b>가 나옵니다.</> : <>③을 비워 두면 {GENRES[genreOf(wordForm.book)].name} 묵상 질문 6개가 나옵니다.</>}
                   </p>
                 )}
                 {wordFormField("title", "제목", { ph: "예: 함께 가시면 가겠나이다" })}
@@ -1368,7 +1400,8 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
                 {wordFormField("background", "② 본문 배경", { rows: 3, ph: "이 본문이 쓰인 때와 상황" })}
                 {wordFormField("commentary", "② 말씀 해설", { rows: 4, ph: "본문을 이해하도록 돕는 설명" })}
                 {wordFormField("key_verse", "② 핵심 구절", { rows: 2, ph: "9 이르되 내가 반드시 너와 함께 가리라" })}
-                {wordFormField("guide", "③ 묵상 도움 (선택 — 두 묵상 질문 아래에 보입니다)", { rows: 2 })}
+                {wordFormField("qs", "③ 묵상 질문 (선택 — 한 줄에 하나, 최대 6개. 비우면 갈래별 6문항이 나옵니다)", { rows: 3, ph: "1. 하나님은 왜 이 사람을 부르셨습니까?\n2. 내가 머뭇거리는 순종은 무엇입니까?" })}
+                {wordFormField("guide", "④ 오늘의 한 걸음 (선택 — 적용하기 단계에 실천 안내로 보입니다)", { rows: 2 })}
                 {wordFormField("prayer", "⑤ 기도문 예시", { rows: 3 })}
                 <p className="form-hint">저작권을 생각해 본문은 그날 묵상할 몇 절 정도만 넣어 주세요. 출처(개역개정 © 대한성서공회)는 자동으로 붙습니다.</p>
                 <div className="form-actions">
@@ -1511,16 +1544,16 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
                     {hlVerses.map((v) => <p key={v.n}><sup>{v.n}</sup>{v.t}</p>)}
                   </section>
                 )}
-                {filled(w.guide) && <section className="guide-card"><b>묵상 도움</b><p>{w.guide}</p></section>}
                 {(() => {
                   const g = GENRES[genreOf(w.book)];
-                  const qs = g.qs;
+                  const bq = bookQs(w.guide);
+                  const qs = bq.length ? bq : g.qs;
                   const doneN = qs.filter((_, i) => filled(draft.answers[i])).length;
                   return (<>
                     <div className="genre-head">
-                      <span className={"genre-chip g-" + genreOf(w.book)}>{g.name} 묵상</span>
+                      <span className={"genre-chip g-" + genreOf(w.book)}>{bq.length ? "교재 묵상 질문" : g.name + " 묵상"}</span>
                       <span className="genre-count">{doneN} / {qs.length}</span>
-                      <p>{g.hint}</p>
+                      <p>{bq.length ? "오늘 교재에 담긴 질문으로 묵상합니다. 한 문장이라도 좋으니 솔직하게 적어 보세요." : g.hint}</p>
                     </div>
                     {qs.map((q, i) => (
                       <section className={"q-card" + (i === qs.length - 1 ? " q-last" : "")} key={i}>
@@ -1540,12 +1573,17 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
 
             {/* 4. 적용하기 */}
             {step.k === "apply" && (
+              <>
+              {filled(applyHint(w.guide)) && (
+                <section className="guide-card"><b>오늘의 한 걸음</b><p>{applyHint(w.guide)}</p></section>
+              )}
               <section className="q-card apply-card">
                 <label><span className="q-num">✓</span><span className="q-text">오늘 내가 실천할 한 가지</span></label>
                 <p className="q-help">작고 구체적일수록 좋습니다. 언제, 어디서, 누구에게 할지 적어 보세요.</p>
                 <textarea rows={4} value={draft.apply} placeholder="예: 점심시간에 미뤄 둔 사과 전화를 먼저 건다"
                   onChange={(e) => upd({ apply: e.target.value })} />
               </section>
+              </>
             )}
 
             {/* 5. 기도하기 */}
@@ -1729,7 +1767,7 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
                   {open && (
                     <div className="card-body">
                       {s.wordId ? (<>
-                        {questionsFor(s.book, s.answers).map((q, i) => (
+                        {questionsFor(s.book, s.answers, words.find((x) => x.id === s.wordId)).map((q, i) => (
                           <Section key={i} name={(NUM[i] || "") + " " + q} text={(s.answers || [])[i]} />
                         ))}
                         <Section name="오늘 실천할 한 가지" text={s.apply} cls="verse" />
