@@ -782,6 +782,7 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
   const [fTag, setFTag] = useState("전체");
   const [openId, setOpenId] = useState(null);
   const [confirmDel, setConfirmDel] = useState(null);
+  const [ask, setAsk] = useState(null);   /* 앱 안 확인창 { text, ok, run } — 휴대폰 앱 안 브라우저에서 confirm 창이 막히는 문제 피함 */
   const [mapBook, setMapBook] = useState(null);
   const [topicSel, setTopicSel] = useState(null);
 
@@ -907,10 +908,18 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
     setWordForm(null); setWordErr("");
   };
   const deleteWord = async (w) => {
-    if (!window.confirm(`${prettyDate(w.date)} 말씀을 삭제할까요? 이 말씀으로 쓴 묵상은 남습니다.`)) return;
-    const { error } = await sb.from("daily_words").delete().eq("id", w.id);
-    if (error) { setWordErr("삭제 실패 — " + error.message); return; }
-    setWords((p) => p.filter((x) => x.id !== w.id));
+    setAsk({
+      text: `${prettyDate(w.date)} 말씀(${wordLabel(w)})을 삭제할까요?\n이 말씀으로 쓴 성도들의 묵상 기록은 지워지지 않고 남습니다.`,
+      ok: "말씀 삭제",
+      run: async () => {
+        const { data, error } = await sb.from("daily_words").delete().eq("id", w.id).select();
+        if (error) { setWordErr("삭제 실패 — " + error.message); return; }
+        if (!data || !data.length) { setWordErr("삭제되지 않았습니다 — 관리자 권한(SQL의 관리자 이메일)을 확인해 주세요."); return; }
+        setWords((p) => p.filter((x) => x.id !== w.id));
+        setWordForm(null); setWordErr("");
+        setMsg("말씀을 삭제했습니다."); setTimeout(() => setMsg(""), 3000);
+      },
+    });
   };
 
   /* 관리자: 교재 PDF로 한 주치 말씀 올리기 */
@@ -1067,11 +1076,26 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
     setView("list");
   };
   const remove = async (id) => {
-    const { error } = await sb.from("meditations").delete().eq("id", id);
-    if (error) { setErr(error.message); return; }
+    const target = items.find((x) => x.id === id);
+    const { data, error } = await sb.from("meditations").delete().eq("id", id).select();
+    setConfirmDel(null);
+    if (error) { setErr("삭제 실패 — " + error.message); return; }
+    if (!data || !data.length) {
+      setErr(target && !target.mine
+        ? "다른 사람의 묵상은 지울 권한이 없습니다. Supabase SQL Editor에서 '묵상이음-삭제권한.sql'을 실행해 주세요."
+        : "삭제되지 않았습니다 — 다시 로그인한 뒤 시도해 주세요.");
+      return;
+    }
+    if (target && target.wordId) { try { localStorage.removeItem("med-draft-" + target.wordId); } catch (e) {} }
     setItems((prev) => prev.filter((x) => x.id !== id));
-    setConfirmDel(null); setOpenId(null);
+    setOpenId(null); setErr("");
+    setMsg("묵상을 삭제했습니다."); setTimeout(() => setMsg(""), 3000);
   };
+  const askRemove = (s) => setAsk({
+    text: s.mine ? `'${s.title || "이 묵상"}'을(를) 삭제할까요?\n아멘과 댓글도 함께 지워지며 되돌릴 수 없습니다.`
+      : `${s.author || "이름 없음"}님의 묵상을 관리자 권한으로 삭제할까요?\n아멘과 댓글도 함께 지워지며 되돌릴 수 없습니다.`,
+    ok: "삭제", run: () => remove(s.id),
+  });
 
   /* ── 아멘 / 댓글 ── */
   const toggleAmen = async (id) => {
@@ -1099,8 +1123,9 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
     setCommentInput((p) => ({ ...p, [id]: "" }));
   };
   const deleteComment = async (mid, cid) => {
-    const { error } = await sb.from("meditation_comments").delete().eq("id", cid);
-    if (!error) setComments((p) => ({ ...p, [mid]: (p[mid] || []).filter((c) => c.id !== cid) }));
+    const { data, error } = await sb.from("meditation_comments").delete().eq("id", cid).select();
+    if (error || !data || !data.length) { setErr(error ? "댓글 삭제 실패 — " + error.message : "댓글을 지울 권한이 없습니다. '묵상이음-삭제권한.sql'을 실행해 주세요."); return; }
+    setComments((p) => ({ ...p, [mid]: (p[mid] || []).filter((c) => c.id !== cid) }));
   };
   const toggleOpen = (s) => {
     const next = openId === s.id ? null : s.id;
@@ -1226,6 +1251,17 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
 
       {err && <div className="banner error">문제가 생겼습니다 — {err}</div>}
       {msg && <div className="banner">{msg}</div>}
+      {ask && (
+        <div className="ask-back" onClick={() => setAsk(null)}>
+          <div className="ask-box" role="dialog" onClick={(e) => e.stopPropagation()}>
+            <p>{ask.text}</p>
+            <div className="ask-actions">
+              <button className="ghost" onClick={() => setAsk(null)}>취소</button>
+              <button className="danger" onClick={async () => { const a = ask; setAsk(null); await a.run(); }}>{ask.ok || "확인"}</button>
+            </div>
+          </div>
+        </div>
+      )}
       {!loaded && <div className="banner">묵상을 불러오는 중…</div>}
 
       {/* ───────── 오늘의 묵상 : 홈 ───────── */}
@@ -1267,6 +1303,7 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
                   {rec ? (rec.done ? "묵상 다시 보기" : "이어서 묵상하기") : "오늘 묵상 시작하기"}
                 </button>
                 {rec && rec.done && <p className="done-line">✓ 이 날의 묵상을 마쳤습니다{rec.scope === "shared" ? " · 교회와 나눔" : ""}</p>}
+                {rec && <p className="day-back"><button className="text-link danger-text" onClick={() => askRemove(rec)}>내 묵상 지우고 처음부터</button></p>}
 
                 {isAdmin && (
                   <div className="word-admin">
@@ -1444,6 +1481,7 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
                       <button className="link" onClick={() => setWordDate(x.date)}>
                         <span className="date">{prettyDate(x.date)}</span> <span className="scripture">{wordLabel(x)}</span> {x.title}
                       </button>
+                      <button className="aw-del" aria-label="이 말씀 삭제" onClick={() => deleteWord(x)}>삭제</button>
                     </li>
                   ))}
                 </ul>
@@ -1796,7 +1834,7 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
                               <li key={c.id}>
                                 <b>{c.author_name || "이름 없음"}</b>
                                 <span>{c.body}</span>
-                                {c.user_id === user.id && (
+                                {(c.user_id === user.id || isAdmin) && (
                                   <button className="text-link danger-text" onClick={() => deleteComment(s.id, c.id)}>지우기</button>
                                 )}
                               </li>
@@ -1816,17 +1854,13 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
                         {s.mine ? (
                           <>
                             <button className="ghost" onClick={() => { if (s.wordId && words.some((x) => x.id === s.wordId)) { setWordDate(s.date); setView("today"); } else startEdit(s); }}>수정</button>
-                            {confirmDel === s.id ? (
-                              <span className="confirm">정말 삭제할까요?
-                                <button className="danger" onClick={() => remove(s.id)}>삭제</button>
-                                <button className="ghost" onClick={() => setConfirmDel(null)}>취소</button>
-                              </span>
-                            ) : (
-                              <button className="ghost danger-text" onClick={() => setConfirmDel(s.id)}>삭제</button>
-                            )}
+                            <button className="ghost danger-text" onClick={() => askRemove(s)}>삭제</button>
                           </>
                         ) : (
-                          <span className="muted">{s.author ? s.author + "님의 묵상" : "다른 지체의 묵상"}</span>
+                          <>
+                            <span className="muted">{s.author ? s.author + "님의 묵상" : "다른 지체의 묵상"}</span>
+                            {isAdmin && <button className="ghost danger-text" onClick={() => askRemove(s)}>삭제 (관리자)</button>}
+                          </>
                         )}
                       </div>
                     </div>
@@ -2225,6 +2259,14 @@ button.link:hover{text-decoration:underline}
 .hl-recall{margin-bottom:14px;padding:12px 16px;border-radius:12px;background:#fffbea;border:1px solid #f1e3a6}
 .hl-recall b{display:block;font-size:12px;color:#8a6d1f;margin-bottom:4px}
 .hl-recall p{font-family:'Noto Serif KR',serif;font-size:14.5px;line-height:1.8}
+.ask-back{position:fixed;inset:0;z-index:100;background:rgba(40,20,20,.45);display:flex;align-items:center;justify-content:center;padding:16px}
+.ask-box{width:100%;max-width:360px;background:#fff;border-radius:16px;padding:22px 20px 16px;box-shadow:0 12px 40px rgba(0,0,0,.25)}
+.ask-box p{font-size:15.5px;line-height:1.7;white-space:pre-wrap;margin:0 0 18px}
+.ask-actions{display:flex;gap:8px;justify-content:flex-end}
+.ask-actions button{min-width:84px}
+.admin-words li{display:flex;align-items:center;gap:8px}
+.admin-words li .link{flex:1;min-width:0;text-align:left}
+.aw-del{flex:none;border:1px solid #e6c9c9;background:#fff;color:#a33;border-radius:8px;padding:4px 10px;font-size:12.5px;cursor:pointer}
 .guide-card{margin-bottom:14px;padding:12px 16px;border-radius:12px;border:1px dashed #d8cba4;background:#fffdf6}
 .guide-card b{display:block;font-size:12px;color:var(--accent);margin-bottom:3px}
 .guide-card p{font-size:14.5px;line-height:1.75;white-space:pre-wrap}
