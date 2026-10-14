@@ -333,7 +333,14 @@ async function pdfToParas(pdfjs, buf) {
       l.x = l.parts[0].x;
       l.h = Math.max(...l.parts.map((q) => q.h));
       l.end = Math.max(...l.parts.map((q) => q.x + q.w));
-      l.text = l.parts.map((q) => q.s).join(" ").replace(/\s+/g, " ").trim();
+      /* 조각 사이가 실제로 떨어져 있을 때만 띄어 씁니다 (글자마다 조각이 나뉘는 PDF 대비) */
+      l.text = l.parts.reduce((acc, q, qi) => {
+        if (!qi) return q.s;
+        const a = l.parts[qi - 1];
+        const gap = q.x - (a.x + (a.w || 0));
+        const sp = /\s$/.test(acc) || /^\s/.test(q.s) || !a.w || gap > Math.max(a.h, q.h) * 0.18;
+        return acc + (sp ? " " : "") + q.s;
+      }, "").replace(/\s+/g, " ").trim();
     });
     lines.sort((a, b) => b.y - a.y);
     pages.push(lines.filter((l) => !/^\d{1,3}$/.test(l.text)));   /* 쪽 번호 빼기 */
@@ -375,117 +382,6 @@ async function pdfToParas(pdfjs, buf) {
   return { paras: paras.map((p) => p.text.trim()).filter(Boolean), meta };
 }
 
-const H = {
-  qt: /^개인\s*묵상/, family: /^가정\s*예배/, week5: /^주중\s*5?\s*일?\s*묵상/, essay: /^이번\s*주\s*말씀\s*묵상/,
-  text: /^오늘의\s*본문$/, look: /^본문\s*들여다보기$/, qs: /^묵상\s*질문$/, step: /^오늘의\s*한\s*걸음$/, prayer: /^기도$/,
-  note: /^인도자\s*노트$/, song: /^함께\s*찬양/, read: /^말씀\s*봉독/, talk: /^말씀\s*나눔/, share: /^가족\s*나눔/, fpray: /^함께\s*기도/,
-  day: /^(월|화|수|목|금)요일$/,
-};
-const DAYS = { 월: "mon", 화: "tue", 수: "wed", 목: "thu", 금: "fri" };
-
-function splitNumbered(list) {
-  const out = [];
-  list.forEach((t) => {
-    const parts = t.split(/(?:^|\s)(?=\d{1,2}\.\s)/).map((x) => x.trim()).filter(Boolean);
-    parts.forEach((x) => {
-      if (/^\d{1,2}\.\s/.test(x)) out.push(x.replace(/^\d{1,2}\.\s*/, ""));
-      else if (out.length) out[out.length - 1] += " " + x; else out.push(x);
-    });
-  });
-  return out;
-}
-
-function parseDevotional(paras, meta) {
-  const d = emptyDevo();
-  let i = 0;
-  /* 표지: 제목·본문 범위 */
-  const coverEnd = paras.findIndex((p) => H.qt.test(p) || H.family.test(p) || H.week5.test(p) || H.essay.test(p));
-  const cover = paras.slice(0, coverEnd < 0 ? 0 : coverEnd);
-  const passageIdx = cover.findIndex((p) => /^[가-힣]+\s*\d+(:\d+)?([-~]\d+(:\d+)?)?$/.test(p));
-  if (passageIdx >= 0) d.passage = cover[passageIdx];
-  d.title = (meta && meta.Title) || cover.find((p) => !/devotional|guide|minister/i.test(p) && p !== d.passage) || "";
-  if (passageIdx > 0 && !(meta && meta.Title)) d.title = cover[passageIdx - 1];
-  i = coverEnd < 0 ? 0 : coverEnd;
-
-  let sec = null, sub = null, day = null;
-  const push = (t) => {
-    if (sec === "qt") {
-      if (sub === "text") d.qt.text = (d.qt.text ? d.qt.text + "\n" : "") + t;
-      else if (sub === "look") d.qt.look = (d.qt.look ? d.qt.look + "\n\n" : "") + t;
-      else if (sub === "qs") d.qt.questions.push(t);
-      else if (sub === "step") d.qt.step = (d.qt.step ? d.qt.step + " " : "") + t;
-      else if (sub === "prayer") d.qt.prayer = (d.qt.prayer ? d.qt.prayer + " " : "") + t;
-    } else if (sec === "family") {
-      if (sub === "note0") d.family.note = (d.family.note ? d.family.note + " " : "") + t;
-      else if (sub === "song") d.family.song = (d.family.song ? d.family.song + " " : "") + t;
-      else if (sub === "read") {
-        if (/^\d+\s/.test(t) || /개역개정/.test(t)) d.family.text = (d.family.text ? d.family.text + "\n" : "") + t;
-        else d.family.readNote = (d.family.readNote ? d.family.readNote + " " : "") + t;
-      }
-      else if (sub === "talk" || sub === "talknote") {
-        if (sub === "talknote") { d.family.talkNote = (d.family.talkNote ? d.family.talkNote + " " : "") + t; sub = "talk"; }
-        else d.family.talk = (d.family.talk ? d.family.talk + "\n\n" : "") + t;
-      }
-      else if (sub === "share") d.family.questions.push(t);
-      else if (sub === "fpray") {
-        const items = t.split(/\s*•\s*/).map((x) => x.trim()).filter(Boolean);
-        if (/^가장은|마칩니다/.test(t) && !/^•/.test(t)) d.family.closing = (d.family.closing ? d.family.closing + " " : "") + t;
-        else d.family.prayers.push(...items);
-      }
-    } else if (sec === "week5" && day) {
-      const o = d.days[day];
-      const mq = t.match(/^오늘의\s*질문\s*(.*)$/), mp = t.match(/^한\s*줄\s*기도\s*(.*)$/);
-      if (mq) o.question = mq[1].trim();
-      else if (mp) o.prayer = mp[1].trim();
-      else if (!o.text && (/^\d+\s/.test(t) || /개역개정/.test(t))) o.text = t;
-      else o.body = (o.body ? o.body + "\n\n" : "") + t;
-    } else if (sec === "essay") {
-      d.essay = (d.essay ? d.essay + "\n\n" : "") + t;
-    }
-  };
-  for (; i < paras.length; i++) {
-    const t = paras[i];
-    const k = t.replace(/\s+/g, "");
-    if (H.qt.test(k)) { sec = "qt"; sub = null; continue; }
-    if (H.family.test(k)) { sec = "family"; sub = null; continue; }
-    if (H.week5.test(k)) { sec = "week5"; sub = null; day = null; continue; }
-    if (H.essay.test(k)) { sec = "essay"; sub = null; continue; }
-    if (sec === "qt") {
-      if (H.text.test(k)) { sub = "text"; continue; }
-      if (H.look.test(k)) { sub = "look"; continue; }
-      if (H.qs.test(k)) { sub = "qs"; continue; }
-      if (H.step.test(k)) { sub = "step"; continue; }
-      if (H.prayer.test(k)) { sub = "prayer"; continue; }
-    }
-    if (sec === "family") {
-      if (H.note.test(k)) { sub = sub === "talk" ? "talknote" : (sub ? sub : "note0"); continue; }
-      if (H.song.test(k)) { sub = "song"; continue; }
-      if (H.read.test(k)) { sub = "read"; continue; }
-      if (H.talk.test(k)) { sub = "talk"; continue; }
-      if (H.share.test(k)) { sub = "share"; continue; }
-      if (H.fpray.test(k)) { sub = "fpray"; continue; }
-    }
-    if (sec === "week5") {
-      const m = k.match(H.day);
-      if (m) { day = DAYS[m[1]]; continue; }
-    }
-    push(t);
-  }
-  d.qt.questions = splitNumbered(d.qt.questions);
-  d.family.questions = splitNumbered(d.family.questions);
-  return d;
-}
-
-function emptyDevo() {
-  const day = () => ({ text: "", body: "", question: "", prayer: "" });
-  return {
-    title: "", passage: "", essay: "",
-    qt: { text: "", look: "", questions: [], step: "", prayer: "" },
-    family: { note: "", song: "", readNote: "", text: "", talkNote: "", talk: "", questions: [], prayers: [], closing: "" },
-    days: { mon: day(), tue: day(), wed: day(), thu: day(), fri: day() },
-  };
-}
-
 /* ═══════════ 교재 PDF → 한 주치 오늘의 말씀 ═══════════ */
 const mondayOf = (ymd) => {
   const [y, m, d] = ymd.split("-").map(Number);
@@ -494,15 +390,6 @@ const mondayOf = (ymd) => {
   return t.toLocaleDateString("sv-SE");
 };
 const BOOKS_LONG_FIRST = [...BOOK_NAMES].sort((a, b) => b.length - a.length);
-function guessPassage(d) {
-  if (d.passage) return d.passage;
-  const src = [d.essay, d.qt && d.qt.look, d.family && d.family.talk].join(" ");
-  for (const b of BOOKS_LONG_FIRST) {
-    const m = src.match(new RegExp(b + "\\s*(\\d+)\\s*(장|:)"));
-    if (m) return `${b} ${m[1]}장`;
-  }
-  return "";
-}
 /* 본문 속 절 번호로 장·절 만들기: 장 4 + "6 … 9 …" → "4:6-9" */
 function refFromText(text, chap) {
   const ns = splitVerses(text).map((v) => v.n).filter((n) => n !== null);
@@ -510,7 +397,6 @@ function refFromText(text, chap) {
   const a = ns[0], b = ns[ns.length - 1];
   return (chap ? chap + ":" : "") + a + (b > a ? "-" + b : "");
 }
-const DAY_LIST = [["mon", "월요일", 0], ["tue", "화요일", 1], ["wed", "수요일", 2], ["thu", "목요일", 3], ["fri", "금요일", 4]];
 function loadPdfJs() {
   return new Promise((resolve, reject) => {
     if (window.pdfjsLib) return resolve(window.pdfjsLib);
@@ -524,39 +410,453 @@ function loadPdfJs() {
     document.head.appendChild(s);
   });
 }
-/* 교재 구조 → 오늘의 말씀 항목들 */
-function devoToEntries(d, monday) {
-  const passage = guessPassage(d);
-  const book = (BOOKS_LONG_FIRST.find((n) => passage.startsWith(n))) || "";
-  const cm = passage.match(/(\d+)\s*(장|:)/);
-  const chap = cm ? cm[1] : "";
-  const title = d.title || "";
+/* ═══════════ 여러 형식의 묵상 교재 읽기 ═══════════
+   PDF·Word(docx)·한글(hwpx)·글(txt/md)·붙여넣은 글 → 문단 → '하루치' 묶음 → 오늘의 말씀 항목
+   제목 낱말(본문/묵상/질문/적용/기도…)과 요일·날짜·Day N 머리말을 넓게 알아보고,
+   머리말이 없으면 문단 모양(절 번호, 물음표)으로 짐작합니다. */
+
+/* 성경 약어 → 이름 */
+const BOOK_ABBR = {
+  창: "창세기", 출: "출애굽기", 레: "레위기", 민: "민수기", 신: "신명기", 수: "여호수아", 삿: "사사기", 룻: "룻기",
+  삼상: "사무엘상", 삼하: "사무엘하", 왕상: "열왕기상", 왕하: "열왕기하", 대상: "역대상", 대하: "역대하",
+  스: "에스라", 느: "느헤미야", 에: "에스더", 욥: "욥기", 시: "시편", 잠: "잠언", 전: "전도서", 아: "아가",
+  사: "이사야", 렘: "예레미야", 애: "예레미야애가", 겔: "에스겔", 단: "다니엘", 호: "호세아", 욜: "요엘", 암: "아모스",
+  옵: "오바댜", 욘: "요나", 미: "미가", 나: "나훔", 합: "하박국", 습: "스바냐", 학: "학개", 슥: "스가랴", 말: "말라기",
+  마: "마태복음", 막: "마가복음", 눅: "누가복음", 요: "요한복음", 행: "사도행전", 롬: "로마서", 고전: "고린도전서",
+  고후: "고린도후서", 갈: "갈라디아서", 엡: "에베소서", 빌: "빌립보서", 골: "골로새서", 살전: "데살로니가전서",
+  살후: "데살로니가후서", 딤전: "디모데전서", 딤후: "디모데후서", 딛: "디도서", 몬: "빌레몬서", 히: "히브리서",
+  약: "야고보서", 벧전: "베드로전서", 벧후: "베드로후서", 요일: "요한일서", 요이: "요한이서", 요삼: "요한삼서",
+  유: "유다서", 계: "요한계시록", 시편: "시편", 애가: "예레미야애가", 계시록: "요한계시록",
+};
+const BOOK_KEYS = [...BOOK_NAMES, ...Object.keys(BOOK_ABBR)].filter((v, i, a) => a.indexOf(v) === i).sort((a, b) => b.length - a.length);
+/* 사사기 4:6-9 / 삿 4:6~9 / 시편 23편 / 사사기 4장 6-9절 / 요한복음 3장 */
+const REF_RE = new RegExp("(^|[^가-힣])(" + BOOK_KEYS.join("|") + ")\\s*(\\d{1,3})\\s*(?:(?::|장\\s*|편\\s*)(\\d{1,3})?(?:\\s*절)?(?:\\s*[-~–]\\s*(\\d{1,3})(?::(\\d{1,3}))?(?:\\s*절)?)?)");
+function findRef(text) {
+  const m = String(text || "").match(REF_RE);
+  if (!m) return null;
+  const key = m[2];
+  const book = BOOK_NAMES.includes(key) ? key : BOOK_ABBR[key];
+  /* 약어는 장:절 꼴일 때만 믿습니다 ("요 3:16"은 되고 "아 2개"는 안 되게) */
+  const whole = m[0].slice(m[1].length);
+  if (!BOOK_NAMES.includes(key) && !/[:장편]/.test(whole)) return null;
+  const chap = m[3];
+  let ref = "";
+  if (m[4]) ref = `${chap}:${m[4]}` + (m[5] ? (m[6] ? `-${m[5]}:${m[6]}` : `-${m[5]}`) : "");
+  else ref = `${chap}장` + (m[5] ? `-${m[5]}장` : "");
+  return { book, chap, ref, at: m.index + m[1].length, text: whole.trim() };
+}
+
+/* 마크다운·꾸밈 기호 걷어내기 */
+const normPara = (t) => String(t || "")
+  .replace(/\[\[\/?note\]\]|\[\[lines:\d+\]\]|\[\[draw(:\d+)?\]\]|\[\[pagebreak\]\]/g, " ")
+  .replace(/^\s*#{1,6}\s*/, "").replace(/^\s*>\s?/, "")
+  .replace(/\*\*|__/g, "").replace(/^\s*[-*+]\s+/, "• ")
+  .replace(/^\s*-{3,}\s*$/, "").replace(/\s+/g, " ").trim();
+
+/* 글(txt/md/docx에서 뽑은 글) → 문단 */
+function textToParas(text) {
   const out = [];
-  if (filled(d.qt.text) || filled(d.qt.look)) {
-    out.push({
-      key: "qt", label: "개인 묵상(QT)", on: true, off: -1, date: shiftDate(monday, -1),
-      title, book, ref: refFromText(d.qt.text, chap),
-      verse: cleanVerse(d.qt.text), background: d.essay ? parasOf(d.essay)[0] || "" : "",
-      commentary: d.qt.look, key_verse: "",
-      guide: filled(d.qt.step) ? d.qt.step : "",
-      qs: (d.qt.questions || []).join("\n"),
-      prayer: d.qt.prayer,
+  String(text || "").replace(/\r/g, "")
+    .replace(/\[\[note\]\][\s\S]*?\[\[\/note\]\]/g, "\n\n")
+    .replace(/^---\s*\n([\s\S]*?)\n---\s*\n/, (all, fm) => fm.split("\n").map((l) => l.replace(/^[^:]{1,12}:\s*/, "").replace(/^["']|["']$/g, "")).join("\n\n") + "\n\n").split(/\n\s*\n/).forEach((block) => {
+    let buf = "";
+    block.split("\n").forEach((raw) => {
+      const l = raw.trim();
+      if (!l) return;
+      const n = normPara(l);
+      const alone = /^(#{1,6}\s|[-*+•]\s|\d{1,2}[.)]\s|[①-⑳]|Q\d|\*\*)/.test(l) || !!classifyPara(n) || !!onlyRef(n);
+      /* 줄바꿈이 문단 나눔인지, 긴 문장이 접힌 것인지: 앞 줄이 문장 끝이거나 짧으면 새 문단 */
+      const prevEnded = !buf || /[.?!。…"”'’)\]]$/.test(buf) || /(다|요|까|라|오|서|소서|멘|니다)$/.test(buf) || buf.length < 25;
+      const newKind = isVerseLike(n) || /^>/.test(l) !== /^>/.test(buf || "")
+        || (!!buf && isVerseLike(normPara(buf)) && /((니다|어요|에요|세요|군요|네요)[.!]?|[?？])\s*$/.test(n));   /* 성경 구절 뒤의 해설 문장 */
+      if (alone) { if (buf) out.push(buf); buf = ""; out.push(l); }
+      else if (buf && !prevEnded && !newKind) buf += " " + l.replace(/^>\s?/, "");
+      else { if (buf) out.push(buf); buf = l; }
     });
+    if (buf) out.push(buf);
+  });
+  return out.map(normPara).filter(Boolean);
+}
+
+/* Word·한글: 압축 파일 안 XML 문단 → 글 */
+function loadScript(src, globalName) {
+  return new Promise((resolve, reject) => {
+    if (window[globalName]) return resolve(window[globalName]);
+    const s = document.createElement("script");
+    s.src = src;
+    s.onload = () => (window[globalName] ? resolve(window[globalName]) : reject(new Error("도구를 불러오지 못했습니다")));
+    s.onerror = () => reject(new Error("파일 읽기 도구를 불러오지 못했습니다 (인터넷 연결 확인)"));
+    document.head.appendChild(s);
+  });
+}
+const loadJsZip = () => loadScript("https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js", "JSZip");
+function xmlParas(xml, pTag, tTag) {
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  const ps = doc.getElementsByTagName(pTag);
+  const out = [];
+  for (const p of Array.from(ps)) {
+    let up = p.parentNode, nested = false;
+    while (up && up.nodeType === 1) { if (up.nodeName === pTag) { nested = true; break; } up = up.parentNode; }
+    if (nested) continue;   /* 문단 안 문단(글상자) 중복 막기 */
+    let t = "";
+    const walk = (n) => {
+      for (const c of Array.from(n.childNodes)) {
+        if (c.nodeType !== 1) continue;
+        if (c.nodeName === tTag) t += c.textContent;
+        else if (/(:|^)(tab)$/.test(c.nodeName)) t += " ";
+        else if (/(:|^)(br|lineBreak)$/.test(c.nodeName)) t += "\n";
+        else if (c.nodeName !== pTag) walk(c);
+      }
+    };
+    walk(p);
+    /* Word 자동 번호 목록은 번호 글자가 없으므로 '• '를 붙여 한 항목으로 둡니다 */
+    if (pTag === "w:p" && p.getElementsByTagName("w:numPr").length && t.trim()) t = "• " + t.trim();
+    out.push(t);
   }
-  DAY_LIST.forEach(([k, name, off]) => {
-    const x = d.days[k];
-    if (!x || (!filled(x.text) && !filled(x.body))) return;
-    out.push({
-      key: k, label: name, on: true, off, date: shiftDate(monday, off),
-      title, book, ref: refFromText(x.text, chap),
-      verse: cleanVerse(x.text), background: "", commentary: x.body,
-      key_verse: cleanVerse(x.text),
-      guide: "",
-      qs: x.question || "",
-      prayer: x.prayer,
+  return out;
+}
+async function docxToText(buf) {
+  const JSZip = await loadJsZip();
+  const zip = await JSZip.loadAsync(buf);
+  const f = zip.file("word/document.xml");
+  if (!f) throw new Error("Word 파일 안에서 본문을 찾지 못했습니다");
+  return xmlParas(await f.async("string"), "w:p", "w:t").join("\n\n");
+}
+async function hwpxToText(buf) {
+  const JSZip = await loadJsZip();
+  const zip = await JSZip.loadAsync(buf);
+  const names = Object.keys(zip.files).filter((n) => /^Contents\/section\d+\.xml$/i.test(n))
+    .sort((a, b) => Number(a.match(/\d+/)[0]) - Number(b.match(/\d+/)[0]));
+  if (!names.length) throw new Error("한글 파일 안에서 본문을 찾지 못했습니다");
+  const parts = [];
+  for (const n of names) parts.push(xmlParas(await zip.file(n).async("string"), "hp:p", "hp:t").join("\n\n"));
+  return parts.join("\n\n");
+}
+
+/* ── 머리말 알아보기 ── */
+const FIELD_WORDS = [
+  ["verse", ["오늘의 본문", "오늘 본문", "오늘의 말씀", "본문 말씀", "성경 본문", "본문 함께 읽기", "본문 읽기", "말씀 봉독", "말씀 읽기", "읽을 말씀", "본문", "말씀", "성경"]],
+  ["bg", ["본문 배경", "배경 이해", "배경", "들어가며", "들어가는 말"]],
+  ["look", ["본문 들여다보기", "들여다보기", "본문 해설", "말씀 해설", "본문 이해", "말씀 이해", "해설", "말씀 묵상", "오늘의 묵상", "묵상 글", "묵상하기", "묵상", "말씀 나눔", "말씀 속으로", "말씀과 삶", "관찰", "이야기", "쉽게 말하면", "한 문장으로", "설교 요약", "요약"]],
+  ["qs", ["마음 열기", "묵상 질문", "오늘의 질문", "나눔 질문", "함께 살펴보기", "삶으로 가져오기", "생각해 보기", "생각해 봐요", "오늘 생각", "가족 나눔", "함께 나누기", "적용 질문", "나눔과 적용", "질문", "나눔"]],
+  ["step", ["오늘의 한 걸음", "오늘의 적용", "삶의 적용", "이번 주 실천", "오늘 한 가지", "한 걸음", "적용하기", "적용", "실천", "결단", "그려 봐요"]],
+  ["prayer", ["한 줄 기도", "오늘의 기도", "함께 기도", "마침 기도", "기도하기", "기도문", "기도 제목", "기도"]],
+  ["keyv", ["이번 주 암송", "암송 구절", "암송", "외워 봐요", "핵심 구절", "오늘의 구절", "요절"]],
+  ["skip", ["인도자 노트", "인도자 안내", "교사용 노트", "부모님께", "함께 찬양", "찬양", "찬송", "광고"]],
+  ["title", ["제목", "설교 제목", "주제"]],
+].map(([f, ws]) => [f, ws.map((w) => w.replace(/\s+/g, ""))]);
+/* 머리말 뒤 같은 줄에 내용이 와도 되는 낱말 (나머지는 '말씀:'처럼 쌍점이 있을 때만) */
+const INLINE_OK = /^(오늘의질문|한줄기도|오늘생각|쉽게말하면|한문장으로|이번주암송|이번주실천|오늘한가지|오늘의한걸음|기도제목|오늘의적용|기도|제목|본문|말씀)$/;
+const DAY_NAMES = { 월: 0, 화: 1, 수: 2, 목: 3, 금: 4, 토: 5, 일: 6, 주: 6 };
+const ORD = { 첫: 1, 둘: 2, 셋: 3, 넷: 4, 다섯: 5, 여섯: 6, 일곱: 7, 여덟: 8, 아홉: 9, 열: 10 };
+const SEP = /^[\s—–\-:·|.,)\]]+/;
+
+/* 날짜 머리말: "10월 14일 (수)", "2026.10.14", "10/14 수", "14일(수)", "수요일 (10/14)", "Day 3", "셋째 날" … */
+const DOWC = "([월화수목금토일])(?:요일)?";
+function parseDayHead(s0) {
+  const s = s0.replace(/^[\s\[\(<〈《【「『○●◎◆◇■□▶▷►☆★✔✓※•·\-–—]+/, "");
+  const dowOpt = "(?:\\s*[\\(\\[]?\\s*" + DOWC + "\\s*[\\)\\]]?)?";
+  const dowReq = "\\s*[\\(\\[]?\\s*" + DOWC + "\\s*[\\)\\]]?";
+  const tidy = (r) => r.replace(/^\s*[\]\)】>」』〉》]+/, "");
+  const dowOf = (c) => (c ? DAY_NAMES[c] : undefined);
+  let m;
+  if ((m = s.match(new RegExp("^(?:(\\d{4})\\s*년\\s*)?(\\d{1,2})\\s*월\\s*(\\d{1,2})\\s*일" + dowOpt))))
+    return { info: { y: m[1] ? +m[1] : null, mo: +m[2], d: +m[3], wd: dowOf(m[4]) }, rest: tidy(s.slice(m[0].length)) };
+  if ((m = s.match(new RegExp("^(\\d{4})\\s*[.\\-/]\\s*(\\d{1,2})\\s*[.\\-/]\\s*(\\d{1,2})\\.?" + dowOpt))))
+    return { info: { y: +m[1], mo: +m[2], d: +m[3], wd: dowOf(m[4]) }, rest: tidy(s.slice(m[0].length)) };
+  if ((m = s.match(new RegExp("^(\\d{1,2})\\s*[./]\\s*(\\d{1,2})\\.?" + dowReq))) && +m[1] <= 12 && +m[2] <= 31)
+    return { info: { mo: +m[1], d: +m[2], wd: dowOf(m[3]) }, rest: tidy(s.slice(m[0].length)) };
+  if ((m = s.match(/^(\d{1,2})\s*[./]\s*(\d{1,2})\.?\s*[\]\)】]?\s*$/)) && +m[1] <= 12 && +m[2] <= 31)
+    return { info: { mo: +m[1], d: +m[2] }, rest: "" };
+  if ((m = s.match(new RegExp("^(\\d{1,2})\\s*일" + dowReq))) && +m[1] <= 31)
+    return { info: { dom: +m[1], dow: dowOf(m[2]) }, rest: tidy(s.slice(m[0].length)) };
+  if ((m = s.match(/^(월|화|수|목|금|토|일)요일/)) || (m = s.match(/^(주)일(?![가-힣])/))) {
+    let rest = s.slice(m[0].length);
+    const info = { dow: DAY_NAMES[m[1]] };
+    const dm = rest.match(/^\s*[\(\[]?\s*(?:(\d{4})\s*[.\-/년]\s*)?(\d{1,2})\s*[./월]\s*(\d{1,2})\s*일?\.?\s*[\)\]]?/);
+    if (dm && +dm[2] <= 12) { info.mo = +dm[2]; info.d = +dm[3]; info.y = dm[1] ? +dm[1] : null; rest = rest.slice(dm[0].length); }
+    return { info, rest: tidy(rest) };
+  }
+  if ((m = s.match(/^(?:day|DAY|Day)\s*(\d{1,2})(?!\d)/)) || (m = s.match(/^제?\s*(\d{1,2})\s*일\s*(?:차|째)/)) || (m = s.match(/^(\d{1,2})\s*일(?=\s*[—–\-:·|]|$)/)))
+    return { info: { n: +m[1] }, rest: s.slice(m[0].length) };
+  if ((m = s.match(/^(첫|둘|셋|넷|다섯|여섯|일곱|여덟|아홉|열)\s*째\s*날/)))
+    return { info: { n: ORD[m[1]] }, rest: s.slice(m[0].length) };
+  return null;
+}
+
+function classifyPara(p) {
+  if (!p) return null;
+  const s = p.replace(/\s*\(\s*\d+\s*분\s*\)\s*$/, "").trim();   /* "(10분)" 빼기 */
+  const k = s.replace(/\s+/g, "");
+  const short = s.length <= 60;
+  /* 큰 묶음 */
+  if (short) {
+    if (/^(개인묵상|개인큐티|큐티|QT)(\(QT\))?$/i.test(k) || /^개인묵상\(?QT\)?$/i.test(k)) return { unit: "qt" };
+    if (/^(소그룹|구역|목장|셀|순|다락방|속회)(나눔|모임|예배|교재)?$/.test(k) && k.length >= 3) return { unit: "group" };
+    if (/^가정예배/.test(k) && s.length <= 30) return { unit: "family" };
+    if (/^(이번주말씀묵상|주보묵상|주보)$/.test(k)) return { unit: "essay" };
+    if (/^(주중\d?일?묵상|한주묵상|\d일묵상|매일묵상|주중묵상|주중\d일로늘릴때|어린이묵상(집)?)$/.test(k)) return { container: true };
+  }
+  /* 요일·날짜·Day N 머리말 */
+  if (short) {
+    const h = parseDayHead(s);
+    if (h) {
+      const { info, rest } = h;
+      if (!rest.trim() || SEP.test(rest) || /^\s/.test(rest)) {
+        const title = rest.replace(SEP, "").replace(/\s*[—–\-:·|]+\s*$/, "").trim();
+        /* 머리말 뒤가 긴 문장이면 머리말이 아님 */
+        const sentence = title.length > 15 && /(다|요|죠|까)[.!?]?$/.test(title);
+        if (title.length <= 40 && !sentence) {
+          const isWord = FIELD_WORDS.some(([, ws]) => ws.includes(title.replace(/\s+/g, "")));
+          return { unit: "day", ...info, title: isWord ? "" : title };
+        }
+      }
+    }
+  }
+  /* 칸 머리말 */
+  for (const [field, words] of FIELD_WORDS) {
+    for (const w of words) {
+      if (!k.startsWith(w)) continue;
+      const after = k.slice(w.length);
+      if (!after || /^[:：]$/.test(after) || /^\(.*\)$/.test(after)) return { field };
+      /* 같은 줄에 내용 */
+      const idx = (() => { let n = 0, i = 0; while (i < s.length && n < w.length) { if (!/\s/.test(s[i])) n++; i++; } return i; })();
+      const restRaw = s.slice(idx);
+      if (/^\s*[:：]/.test(restRaw)) return { field, rest: restRaw.replace(/^\s*[:：]\s*/, "").trim() };
+      if (INLINE_OK.test(w) && /^\s+\S/.test(restRaw)) {
+        if ((w === "본문" || w === "말씀") && !findRef(restRaw.slice(0, 30))) continue;
+        if (w === "기도" && restRaw.trim().length < 2) continue;
+        return { field, rest: restRaw.trim() };
+      }
+    }
+  }
+  return null;
+}
+
+/* 문단 모양 */
+const isVerseLike = (p) => /^\d{1,3}\s+[가-힣"“'‘]/.test(p) || /\(?\s*개역\s*개정\s*\)?/.test(p)
+  || (/^["“]/.test(p) && !!findRef(p.slice(-30)));
+const onlyRef = (p) => {
+  const r = findRef(p);
+  if (!r) return null;
+  const rest = p.replace(r.text, "").replace(/개역\s*개정|새번역|쉬운성경|NIV|ESV/g, "").replace(/[\s()\[\]{}<>.,:;·\-–—~|"“”'‘’]/g, "");
+  return rest.length === 0 ? r : null;
+};
+const isQuestion = (p) => /[?？]\s*$/.test(p) || /[?？]\s*["”']?\s*$/.test(p);
+
+function splitQuestions(list) {
+  const out = [];
+  const marked = (t) => /(^|\s)(\d{1,2}[.)]|[①-⑳]|Q\s*\d{1,2}|•)\s*\S/.test(t);
+  list.flatMap((t) => marked(t) ? [t] : t.replace(/([?？])\s+(?=\S)/g, "$1\n").split("\n")).forEach((t) => {
+    const parts = t.replace(/Q\s+(\d)/g, "Q$1").split(/(?:^|\s)(?=(?:\d{1,2}[.)]|[①-⑳]|Q\d{1,2}[.:)]?|•)\s*)/).map((x) => x.trim()).filter(Boolean);
+    parts.forEach((x) => {
+      const isItem = /^(\d{1,2}[.)]|[①-⑳]|Q\d{1,2}[.:)]?|•)/.test(x);
+      const c = x.replace(/^(\d{1,2}[.)]|[①-⑳]|Q\d{1,2}[.:)]?|•)\s*/, "").trim();
+      if (!c) return;
+      if (isItem || !out.length || isQuestion(out[out.length - 1])) out.push(c);
+      else out[out.length - 1] += " " + c;
     });
   });
-  return { entries: out, passage, title };
+  return out.filter((q) => q.length > 1);
+}
+
+function newUnit(c) {
+  return { type: c.unit, dow: c.dow, n: c.n, y: c.y, mo: c.mo, d: c.d, dom: c.dom, title: c.title || "", head: c.title || "",
+    verse: [], bg: [], look: [], qs: [], step: [], prayer: [], keyv: [], refs: [], field: null };
+}
+function unitHasBody(u) { return u.verse.length || u.look.length || u.qs.length || u.bg.length || u.step.length || u.prayer.length; }
+
+function parseAnyDevotional(rawParas, meta) {
+  const paras = rawParas.map(normPara).filter(Boolean);
+  const cover = [];
+  const units = [];
+  let cur = null, ctxGroup = null;
+  const add = (u, field, t) => {
+    if (!t) return;
+    if (field === "title") { u.title = u.title || t; return; }
+    if (field === "skip") return;
+    if (field === "verse") {
+      const r = onlyRef(t);
+      if (r) { u.refs.push(r); return; }
+      if (u.verse.length && !isVerseLike(t) && t.length > 40) { u.look.push(t); return; }
+      if (!isVerseLike(t) && /(읽습니다|읽어요|읽으세요|읽게|읽겠습니다|봉독|소리\s*내어)/.test(t) && t.length < 120) { u.bg.push(t); return; }
+      const lead = !u.verse.length && t.match(/^([^\d]{4,120}?[.!?])\s+(\d{1,3}\s+[가-힣"“].*)$/);
+      if (lead) { u.bg.push(lead[1]); t = lead[2]; }
+      const r2 = findRef(t); if (r2) u.refs.push(r2);
+      u.verse.push(t); return;
+    }
+    if (field === "keyv") { const r = onlyRef(t); if (!r) u.keyv.push(t); return; }
+    if (field) { u[field].push(t); return; }
+    /* 머리말 없이 온 문단은 모양으로 짐작 */
+    const r = onlyRef(t);
+    if (r) { u.refs.push(r); return; }
+    if (!u.verse.length && isVerseLike(t)) { u.verse.push(t); const r2 = findRef(t); if (r2) u.refs.push(r2); return; }
+    if (isQuestion(t) || /^(\d{1,2}[.)]|Q\s*\d)\s*\S.*[?？]/.test(t)) { u.qs.push(t); return; }
+    if (/^(주님|하나님|아버지|주여|예수님|사랑의|거룩하신|은혜로우신|자비로우신|살아계신|좋으신)[^.?!]{0,25}[,，]/.test(t) || /아멘\.?\s*$/.test(t)) { u.prayer.push(t); return; }
+    u.look.push(t);
+  };
+  for (const p of paras) {
+    /* "본문 마태복음 6:25 | 제목 염려하지 말라" 처럼 한 줄에 여러 칸 */
+    const segs = p.includes("|") ? p.split(/\s*\|\s*/).filter(Boolean) : [p];
+    for (const t of segs) {
+      const c = classifyPara(t);
+      if (c && c.container) { ctxGroup = "days"; continue; }
+      if (c && c.unit) {
+        cur = newUnit(c);
+        if (c.unit === "day" && c.title) { const r = findRef(c.title); if (r) cur.refs.push(r); }
+        units.push(cur);
+        continue;
+      }
+      if (c && c.field) {
+        if (!cur) {
+          /* 머리말 없는 첫 칸: 한 편짜리 교재 */
+          cur = newUnit({ unit: "single" }); units.push(cur);
+        }
+        cur.field = c.field;
+        if (c.rest) add(cur, c.field, c.rest);
+        continue;
+      }
+      if (!cur) { cover.push(t); continue; }
+      /* 문단이 질문 칸에 들어왔는데 질문도 번호도 아니고 긴 글이면 해설로 */
+      if (cur.field === "qs" && !isQuestion(t) && !/^(\d{1,2}[.)]|[①-⑳]|Q\d|•)/.test(t) && t.length > 80) { add(cur, null, t); continue; }
+      add(cur, cur.field, t);
+    }
+  }
+  /* 머리말이 하나도 없으면 문서 전체를 한 편으로 */
+  if (!units.length) {
+    const u = newUnit({ unit: "single" });
+    const body = cover.splice(0);
+    const first = body[0] && !isVerseLike(body[0]) && body[0].length <= 40 ? body.shift() : "";
+    if (first) { cover.push(first); const r = findRef(first); if (r) u.refs.push(r); }
+    body.forEach((t) => add(u, null, t));
+    units.push(u);
+  }
+  /* 제목·본문 범위 */
+  let passage = null;
+  for (const t of cover) { const r = findRef(t); if (r) { passage = r; break; } }
+  if (!passage) for (const u of units) { if (u.refs[0]) { passage = u.refs[0]; break; } }
+  if (!passage) {   /* 해설 글 속 "사사기 4장" 같은 말 (약어는 빼고 성경 이름만) */
+    for (const t of paras) { const r = findRef(t); if (r && BOOK_NAMES.includes(r.text.match(/^[가-힣]+/)[0])) { passage = r; break; } }
+  }
+  const metaTitle = String((meta && meta.Title) || "").replace(/^Microsoft Word\s*-\s*/i, "").replace(/\.(docx?|hwpx?|pdf|txt|md)$/i, "").trim();
+  const coverTitle = cover.find((t) => t.length <= 40 && !onlyRef(t) && !/devotional|guide|minister|말씀\s*묵상\s*자료|^\d{4}\s*년|설교자|목사$/i.test(t) && !/^[\d\s.\-/년월일()]+$/.test(t) && !classifyPara(t));
+  const title = (metaTitle && !/^(untitled|제목\s*없음|말씀\s*묵상\s*자료)$/i.test(metaTitle) ? metaTitle : "") || coverTitle || "";
+  return { units: units.filter(unitHasBody), title, passage, cover, ctxGroup };
+}
+
+/* 하루치 묶음 → 오늘의 말씀 항목 (monday = 기준 주 월요일) */
+function unitsToEntries(parsed, monday) {
+  const { units, title: docTitle, passage } = parsed;
+  const essay = units.find((u) => u.type === "essay");
+  const list = units.length > 1 ? units.filter((u) => u.type !== "essay") : units;
+  const used = new Set();
+  const [my] = monday.split("-").map(Number);
+  const offOfDate = (u) => {
+    let y = u.y || my;
+    const md = new Date(my, +monday.split("-")[1] - 1, +monday.split("-")[2]);
+    let t = new Date(y, u.mo - 1, u.d);
+    if (!u.y) {   /* 해가 없으면 기준일에 가장 가까운 해로 */
+      const alt = [new Date(y - 1, u.mo - 1, u.d), new Date(y + 1, u.mo - 1, u.d)];
+      alt.forEach((a) => { if (Math.abs(a - md) < Math.abs(t - md)) t = a; });
+    }
+    return Math.round((t - md) / 86400000);
+  };
+  const sawWeekday = { v: false };
+  const out = [];
+  const hasDays = list.some((u) => u.type === "day");
+  /* 1) 요일·날짜가 정해진 날 먼저 */
+  const md0 = new Date(my, +monday.split("-")[1] - 1, +monday.split("-")[2]);
+  let last = null;   /* 앞서 나온 날짜 (달이 빠진 "14일(수)"에 씀) */
+  const fixed = list.map((u) => {
+    if (u.type !== "day") return null;
+    let off = null;
+    if (u.dom && !u.mo) {
+      let cands = [];
+      if (last) {
+        const t = new Date(last.getFullYear(), last.getMonth() + (u.dom < last.getDate() ? 1 : 0), u.dom);
+        cands = [t];
+      } else {
+        for (const k of [-1, 0, 1]) cands.push(new Date(md0.getFullYear(), md0.getMonth() + k, u.dom));
+        if (u.dow !== undefined) { const ok = cands.filter((t) => (t.getDay() + 6) % 7 === u.dow); if (ok.length) cands = ok; }
+        cands.sort((a, b) => Math.abs(a - md0) - Math.abs(b - md0));
+      }
+      const t = cands[0];
+      u.y = t.getFullYear(); u.mo = t.getMonth() + 1; u.d = t.getDate();
+    }
+    if (u.mo) { off = offOfDate(u); last = new Date(md0.getTime() + off * 86400000); u.fixedDate = true; }
+    else if (u.n) off = u.n - 1;
+    else if (u.dow !== undefined) { if (u.dow === 6) off = sawWeekday.v ? 6 : -1; else { off = u.dow; sawWeekday.v = true; } }
+    if (off !== null) used.add(off);
+    return off;
+  });
+  list.forEach((u, idx) => {
+    let off = fixed[idx], label = "";
+    if (u.type === "day") {
+      if (u.mo) label = `${u.mo}월 ${u.d}일` + (u.dow !== undefined || u.wd !== undefined ? ` (${["월", "화", "수", "목", "금", "토", "일"][u.wd !== undefined ? u.wd : u.dow]})` : "");
+      else if (u.n) label = `${u.n}일째`;
+      else if (u.dow !== undefined) label = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "주일"][u.dow];
+    }
+    if (u.type === "qt") label = "개인 묵상(QT)";
+    if (u.type === "group") label = "소그룹 나눔";
+    if (u.type === "family") label = "가정예배";
+    if (u.type === "essay") label = "주보 묵상";
+    if (u.type === "single") label = "교재 묵상";
+    if (off === null) {
+      const prefer = u.type === "single" && !hasDays ? [0, 1, 2, 3, 4, 5, 6, -1] : [-1, 6, 5, 0, 1, 2, 3, 4];
+      off = prefer.find((o) => !used.has(o));
+      if (off === undefined) { off = 7; while (used.has(off)) off++; }
+    }
+    used.add(off);
+    const ref0 = u.refs[0] || passage;
+    const book = ref0 ? ref0.book : "";
+    const chap = ref0 ? ref0.chap : "";
+    const verse = u.verse.join(" ");
+    let ref = "";
+    if (u.refs[0] && /:/.test(u.refs[0].ref)) ref = u.refs[0].ref;
+    else ref = refFromText(verse, chap) || (u.refs[0] ? u.refs[0].ref : "");
+    const qs = splitQuestions(u.qs).slice(0, 6);
+    const bullets = u.prayer.some((t) => /^•/.test(t));
+    const background = [...u.bg, ...(essay && (u.type === "qt" || list.length === 1) && essay !== u ? [parasOf(essay.look.join("\n\n"))[0] || ""] : [])].filter(Boolean).join("\n\n");
+    out.push({
+      fixedDate: !!u.fixedDate,
+      key: u.type + "-" + idx, label: label + (u.type === "day" && u.head && !/^\d/.test(u.head) ? " — " + u.head : ""),
+      on: u.type !== "family", off, date: shiftDate(monday, off),
+      title: u.title || docTitle, book, ref,
+      verse: cleanVerse(verse),
+      background,
+      commentary: u.look.join("\n\n"),
+      key_verse: cleanVerse(u.keyv.join(" ")) || (u.type === "day" ? cleanVerse(verse) : ""),
+      guide: u.step.join(" "),
+      qs: qs.join("\n"),
+      prayer: bullets ? u.prayer.map((t) => t.replace(/^•\s*/, "• ")).join("\n") : u.prayer.join(" "),
+    });
+  });
+  return {
+    entries: out.sort((a, b) => a.off - b.off),
+    title: docTitle,
+    passage: passage ? `${passage.book} ${passage.ref}` : "",
+  };
+}
+
+/* 파일 하나 → 문단 */
+async function fileToParas(file) {
+  const name = (file.name || "").toLowerCase();
+  const buf = await file.arrayBuffer();
+  if (/\.pdf$/.test(name) || file.type === "application/pdf") {
+    const pdfjs = await loadPdfJs();
+    return pdfToParas(pdfjs, buf);
+  }
+  if (/\.docx$/.test(name)) return { paras: textToParas(await docxToText(buf)), meta: {} };
+  if (/\.hwpx$/.test(name)) return { paras: textToParas(await hwpxToText(buf)), meta: {} };
+  if (/\.(hwp|doc)$/.test(name)) throw new Error(/\.hwp$/.test(name)
+    ? "예전 한글(.hwp) 파일은 바로 읽을 수 없습니다. 한글에서 'PDF로 저장'하거나 '다른 이름으로 저장 → .hwpx'로 바꿔 올려 주세요. 글을 복사해 아래 '글 붙여넣기'에 넣어도 됩니다."
+    : "예전 Word(.doc) 파일은 읽을 수 없습니다. Word에서 .docx나 PDF로 저장해 올려 주세요.");
+  if (/\.(txt|md|markdown)$/.test(name) || /^text\//.test(file.type)) {
+    let t = new TextDecoder("utf-8").decode(buf);
+    if (t.includes("�")) { try { t = new TextDecoder("euc-kr").decode(buf); } catch (e) {} }
+    return { paras: textToParas(t), meta: {} };
+  }
+  throw new Error("이 파일 형식은 읽을 수 없습니다. PDF, Word(.docx), 한글(.hwpx), 글(.txt) 파일을 올려 주세요.");
 }
 
 const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } };
@@ -924,28 +1224,41 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
 
   /* 관리자: 교재 PDF로 한 주치 말씀 올리기 */
   const [imp, setImp] = useState(null);   /* null | { status, err, title, passage, monday, entries } */
-  const openImport = () => { setWordForm(null); setImp({ status: "", err: "", title: "", passage: "", monday: mondayOf(wordDate), entries: [] }); };
-  const readPdf = async (file) => {
+  const openImport = () => { setWordForm(null); setImp({ status: "", err: "", title: "", passage: "", monday: mondayOf(wordDate), entries: [], paste: "", showPaste: false }); };
+  const applyParsed = (paras, meta, what) => {
+    if (!paras.length) {
+      setImp((p) => ({ ...p, status: "", err: what === "PDF"
+        ? "이 PDF에서 글자를 찾지 못했습니다. 사진을 찍어 만든(스캔) PDF는 읽을 수 없으니, 원본 파일(Word·한글)이나 글 붙여넣기를 이용해 주세요."
+        : "읽을 글이 없습니다." }));
+      return;
+    }
+    const parsed = parseAnyDevotional(paras, meta);
+    setImp((p) => {
+      const r = unitsToEntries(parsed, p.monday);
+      if (!r.entries.length) return { ...p, status: "", err: "묵상 내용을 찾지 못했습니다. 본문·묵상·질문·기도 같은 제목이 있는지 확인해 주세요." };
+      return { ...p, status: "", err: "", title: r.title, passage: r.passage, source: what,
+        entries: r.entries.map((e) => ({ ...e, overwrite: false })) };
+    });
+  };
+  const readFile = async (file) => {
     if (!file) return;
-    setImp((p) => ({ ...p, status: "PDF를 읽는 중…", err: "", entries: [] }));
+    const what = /\.pdf$/i.test(file.name) ? "PDF" : /\.docx$/i.test(file.name) ? "Word" : /\.hwpx?$/i.test(file.name) ? "한글" : "글";
+    setImp((p) => ({ ...p, status: `${what} 파일을 읽는 중…`, err: "", entries: [] }));
     try {
-      const pdfjs = await loadPdfJs();
-      const { paras, meta } = await pdfToParas(pdfjs, await file.arrayBuffer());
-      const d = parseDevotional(paras, meta);
-      setImp((p) => {
-        const r = devoToEntries(d, p.monday);
-        if (!r.entries.length) {
-          return { ...p, status: "", err: "이 PDF에서 '개인 묵상(QT)'이나 '주중 5일 묵상'을 찾지 못했습니다. 묵상 교재 PDF인지 확인해 주세요." };
-        }
-        return { ...p, status: "", err: "", title: r.title, passage: r.passage,
-          entries: r.entries.map((e) => ({ ...e, overwrite: false })) };
-      });
+      const { paras, meta } = await fileToParas(file);
+      applyParsed(paras, meta, what);
     } catch (e) {
-      setImp((p) => ({ ...p, status: "", err: "PDF를 읽지 못했습니다 — " + ((e && e.message) || "알 수 없는 오류") }));
+      setImp((p) => ({ ...p, status: "", err: (e && e.message) || "파일을 읽지 못했습니다" }));
     }
   };
+  const readPasted = () => {
+    const t = imp && imp.paste;
+    if (!filled(t)) { setImp((p) => ({ ...p, err: "붙여넣은 글이 없습니다." })); return; }
+    applyParsed(textToParas(t), {}, "붙여넣은 글");
+  };
   const setEntry = (i, patch) => setImp((p) => ({ ...p, entries: p.entries.map((e, j) => (j === i ? { ...e, ...patch } : e)) }));
-  const moveWeek = (monday) => setImp((p) => ({ ...p, monday, entries: p.entries.map((e) => ({ ...e, date: shiftDate(monday, e.off) })) }));
+  /* 교재에 날짜가 적힌 날은 그 날짜 그대로, 요일만 있는 날은 고른 주로 옮김 */
+  const moveWeek = (monday) => setImp((p) => ({ ...p, monday, entries: p.entries.map((e) => (e.fixedDate ? e : { ...e, date: shiftDate(monday, e.off) })) }));
   const saveImport = async () => {
     const list = imp.entries.filter((e) => e.on);
     if (!list.length) { setImp((p) => ({ ...p, err: "올릴 날을 하나 이상 골라 주세요." })); return; }
@@ -1327,24 +1640,37 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
             )}
 
             {isAdmin && !imp && (
-              <button className="ghost import-open" onClick={openImport}>📄 교재 PDF로 한 주 말씀 올리기</button>
+              <button className="ghost import-open" onClick={openImport}>📄 교재 파일로 말씀 올리기 (PDF·Word·한글)</button>
             )}
 
             {isAdmin && imp && (
               <section className="word-form import-panel">
-                <h3>교재 PDF로 한 주 올리기 <small>관리자</small></h3>
+                <h3>교재 파일로 말씀 올리기 <small>관리자</small></h3>
                 <p className="form-hint" style={{ marginTop: 4 }}>
-                  묵상 교재 PDF의 '주중 5일 묵상'은 월~금 오늘의 말씀으로, '개인 묵상(QT)'은 그 주 주일 말씀으로 들어갑니다.
-                  저장하기 전에 아래에서 날짜와 내용을 확인하고 고칠 수 있습니다.
+                  PDF·Word(.docx)·한글(.hwpx)·글(.txt) 묵상 교재를 읽어 날마다 오늘의 말씀으로 나눕니다.
+                  '10월 14일(수)'·'2026.10.14'·'14일(수)'처럼 날짜가 적힌 날은 그 날짜 그대로(한 달치도 됩니다),
+                  '월요일'·'Day 1'처럼 요일·순서만 있으면 아래 고른 주에 맞춰 들어갑니다. '개인 묵상(QT)'·'소그룹 나눔'은 주일로,
+                  머리말이 없으면 한 편으로 올립니다. 저장하기 전에 아래에서 날짜와 내용을 확인하고 고칠 수 있습니다.
                 </p>
                 <div className="row">
                   <label className="field"><span>그 주 월요일</span>
                     <input type="date" value={imp.monday} onChange={(e) => e.target.value && moveWeek(mondayOf(e.target.value))} />
                   </label>
-                  <label className="field"><span>교재 PDF</span>
-                    <input type="file" accept=".pdf,application/pdf" onChange={(e) => readPdf(e.target.files && e.target.files[0])} />
+                  <label className="field"><span>교재 파일</span>
+                    <input type="file" accept=".pdf,.docx,.hwpx,.hwp,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
+                      onChange={(e) => { readFile(e.target.files && e.target.files[0]); e.target.value = ""; }} />
                   </label>
                 </div>
+                <button className="text-link" style={{ marginTop: 6 }} onClick={() => setImp((p) => ({ ...p, showPaste: !p.showPaste }))}>
+                  {imp.showPaste ? "글 붙여넣기 닫기" : "파일 대신 글 붙여넣기 (한글·카톡·메모에서 복사)"}
+                </button>
+                {imp.showPaste && (
+                  <div style={{ marginTop: 8 }}>
+                    <textarea rows={8} style={{ width: "100%", boxSizing: "border-box", fontFamily: "inherit", fontSize: 15, padding: 10, borderRadius: 10, border: "1px solid #e2d6bf" }} value={imp.paste} placeholder={"예)\n월요일 — 함께 가시는 하나님\n본문: 사사기 4:6-9\n6 드보라가 사람을 보내어 …\n묵상\n…\n질문\n1. …\n기도\n…"}
+                      onChange={(e) => setImp((p) => ({ ...p, paste: e.target.value }))} />
+                    <button className="ghost" style={{ marginTop: 6, display: "block" }} onClick={readPasted}>붙여넣은 글 읽기</button>
+                  </div>
+                )}
                 {imp.status && <p className="ai-like">{imp.status}</p>}
                 {imp.err && <p className="auth-err">{imp.err}</p>}
 
