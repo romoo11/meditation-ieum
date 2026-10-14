@@ -255,7 +255,10 @@ function splitVerses(text) {
   });
   return out.filter((v) => v.t);
 }
-const cleanVerse = (t) => String(t || "").replace(/\s*\(개역개정\)\s*/g, " ").trim();
+/* "(개역개정)" 빼고, "[27] 그런즉" · "27. 그런즉" 같은 절 번호를 "27 그런즉"으로 맞춤 */
+const cleanVerse = (t) => String(t || "").replace(/\s*\(개역\s*개정\)\s*/g, " ")
+  .replace(/\[\s*(\d{1,3})\s*\]\s*/g, " $1 ").replace(/(^|\s)(\d{1,3})[.)]\s+(?=[가-힣"“'‘])/g, "$1$2 ")
+  .replace(/\s+/g, " ").trim();
 const parasOf = (t) => String(t || "").split(/\n\s*\n|\n/).map((s) => s.trim()).filter(Boolean);
 const filled = (s) => !!String(s || "").trim();
 /* 적용 도움: 질문 묶음(교재 묵상 질문·오늘의 질문)은 빼고 실천 안내만 남김 — 묵상 질문은 갈래별 6문항으로 하나만 보이게 */
@@ -622,7 +625,7 @@ function classifyPara(p) {
       /* 같은 줄에 내용 */
       const idx = (() => { let n = 0, i = 0; while (i < s.length && n < w.length) { if (!/\s/.test(s[i])) n++; i++; } return i; })();
       const restRaw = s.slice(idx);
-      if (/^\s*[:：]/.test(restRaw)) return { field, rest: restRaw.replace(/^\s*[:：]\s*/, "").trim() };
+      if (/^\s*[:：—–\-]/.test(restRaw)) return { field, rest: restRaw.replace(/^\s*[:：—–\-]+\s*/, "").trim(), dashed: true };
       if (INLINE_OK.test(w) && /^\s+\S/.test(restRaw)) {
         if ((w === "본문" || w === "말씀") && !findRef(restRaw.slice(0, 30))) continue;
         if (w === "기도" && restRaw.trim().length < 2) continue;
@@ -634,7 +637,7 @@ function classifyPara(p) {
 }
 
 /* 문단 모양 */
-const isVerseLike = (p) => /^\d{1,3}\s+[가-힣"“'‘]/.test(p) || /\(?\s*개역\s*개정\s*\)?/.test(p)
+const isVerseLike = (p) => /^(\[\s*\d{1,3}\s*\]|\d{1,3}[.)]?)\s*[가-힣"“'‘]/.test(p) || /\(?\s*개역\s*개정\s*\)?/.test(p)
   || (/^["“]/.test(p) && !!findRef(p.slice(-30)));
 const onlyRef = (p) => {
   const r = findRef(p);
@@ -661,7 +664,7 @@ function splitQuestions(list) {
 }
 
 function newUnit(c) {
-  return { type: c.unit, dow: c.dow, n: c.n, y: c.y, mo: c.mo, d: c.d, dom: c.dom, title: c.title || "", head: c.title || "",
+  return { type: c.unit, dow: c.dow, wd: c.wd, n: c.n, y: c.y, mo: c.mo, d: c.d, dom: c.dom, title: c.title || "", head: c.title || "",
     verse: [], bg: [], look: [], qs: [], step: [], prayer: [], keyv: [], refs: [], field: null };
 }
 function unitHasBody(u) { return u.verse.length || u.look.length || u.qs.length || u.bg.length || u.step.length || u.prayer.length; }
@@ -713,7 +716,12 @@ function parseAnyDevotional(rawParas, meta) {
           cur = newUnit({ unit: "single" }); units.push(cur);
         }
         cur.field = c.field;
-        if (c.rest) add(cur, c.field, c.rest);
+        if (c.rest && c.field === "verse" && !(isVerseLike(c.rest) && !/개역\s*개정/.test(c.rest) && c.rest.length > 40)) {
+          /* "오늘의 본문 — 오직 믿음의 법으로니라 (로마서 3:27)": 머리말 줄의 말은 핵심 구절로, 본문 칸은 열어 둠 */
+          const r = findRef(c.rest); if (r) cur.refs.push(r);
+          const q = c.rest.replace(/\s*[(\[][^()\[\]]*\d+\s*[:장편][^()\[\]]*[)\]]\s*$/, "").replace(/\(?\s*개역\s*개정\s*\)?/g, "").trim();
+          if (q && !onlyRef(c.rest)) cur.headVerse = q;
+        } else if (c.rest) add(cur, c.field, c.rest);
         continue;
       }
       if (!cur) { cover.push(t); continue; }
@@ -812,8 +820,11 @@ function unitsToEntries(parsed, monday) {
     const chap = ref0 ? ref0.chap : "";
     const verse = u.verse.join(" ");
     let ref = "";
-    if (u.refs[0] && /:/.test(u.refs[0].ref)) ref = u.refs[0].ref;
-    else ref = refFromText(verse, chap) || (u.refs[0] ? u.refs[0].ref : "");
+    const fromNums = splitVerses(verse).some((v) => v.n !== null) ? refFromText(verse, chap) : "";
+    const headRef = u.refs[0] && /:/.test(u.refs[0].ref) ? u.refs[0].ref : "";
+    /* 절 번호가 머리말 장절보다 넓으면 절 번호를 따름 (머리말 3:27, 본문 27~28절 → 3:27-28) */
+    if (fromNums && (!headRef || (/-/.test(fromNums) && !/-/.test(headRef)))) ref = fromNums;
+    else ref = headRef || fromNums || (u.refs[0] ? u.refs[0].ref : "");
     const qs = splitQuestions(u.qs).slice(0, 6);
     const bullets = u.prayer.some((t) => /^•/.test(t));
     const background = [...u.bg, ...(essay && (u.type === "qt" || list.length === 1) && essay !== u ? [parasOf(essay.look.join("\n\n"))[0] || ""] : [])].filter(Boolean).join("\n\n");
@@ -822,10 +833,10 @@ function unitsToEntries(parsed, monday) {
       key: u.type + "-" + idx, label: label + (u.type === "day" && u.head && !/^\d/.test(u.head) ? " — " + u.head : ""),
       on: u.type !== "family", off, date: shiftDate(monday, off),
       title: u.title || docTitle, book, ref,
-      verse: cleanVerse(verse),
+      verse: cleanVerse(verse || u.headVerse || ""),
       background,
       commentary: u.look.join("\n\n"),
-      key_verse: cleanVerse(u.keyv.join(" ")) || (u.type === "day" ? cleanVerse(verse) : ""),
+      key_verse: cleanVerse(u.keyv.join(" ")) || (verse && u.headVerse ? cleanVerse(u.headVerse) : "") || (u.type === "day" ? cleanVerse(verse) : ""),
       guide: u.step.join(" "),
       qs: qs.join("\n"),
       prayer: bullets ? u.prayer.map((t) => t.replace(/^•\s*/, "• ")).join("\n") : u.prayer.join(" "),
@@ -1869,6 +1880,11 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
                   ))}
                 </div>
                 <p className="word-source">{BIBLE_SOURCE}</p>
+                {isAdmin && !verses.some((v) => v.n !== null) && cleanVerse(w.verse).length < 70 && (
+                  <p className="form-hint" style={{ marginTop: 8, color: "#a33" }}>
+                    관리자 안내: 본문 구절이 들어 있지 않은 것 같습니다. 교재 파일을 다시 가져오며 '덮어쓰기'를 켜거나, 홈의 '말씀 수정'에서 ① 본문을 넣어 주세요.
+                  </p>
+                )}
               </section>
             )}
 
