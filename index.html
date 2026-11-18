@@ -30,7 +30,7 @@ const SUPABASE_ANON_KEY = "sb_publishable_yeMSSGWEb8G_SebUwf4r1Q_swsWOKW0";
 /* 오늘의 말씀을 올릴 수 있는 관리자 이메일 (SQL 파일의 이메일과 같아야 합니다) */
 const ADMIN_EMAIL = "romoo2@hanmail.net";
 const BIBLE_SOURCE = "성경전서 개역개정판 © 대한성서공회";
-const APP_VERSION = "2.0.8";
+const APP_VERSION = "2.0.9";
 /* 교인에게 알려 줄 묵상이음 주소 — 지금 열려 있는 주소를 그대로 씀 (주소가 바뀌어도 따라감) */
 const APP_URL = (() => {
   try { const l = window.location; if (/^https?:$/.test(l.protocol)) return l.origin + l.pathname.replace(/index\.html$/, ""); } catch (e) {}
@@ -750,7 +750,47 @@ function splitQuestions(list) {
    하루치 묵상자료 여러 개를 한 파일로 묶으면 날마다 표지가 되풀이되는데,
    이것을 앞날 기도문에 이어 붙이지 않고 '그날의 날짜·제목·장절'로 읽습니다. */
 const isEyebrow = (t) => typeof t === "string" && /^말씀묵상자료$/.test(t.replace(/\s+/g, ""));
-function foldCovers(paras) {
+/* 표지가 앞 문단에 붙거나 한 줄로 읽힌 경우("…아멘. 말 씀 묵 상 자 료 제목 시편 20:1-9 2026년 11월 19일 목요일 설교자")
+   표지 머리말 · 제목 · 장절 · 날짜 줄로 다시 나눕니다. */
+const EYEBROW_IN = /말\s+씀\s+묵\s+상\s+자\s+료/;
+function splitCoverParas(paras) {
+  const out = [];
+  for (const t of paras) {
+    if (typeof t !== "string" || isEyebrow(t)) { out.push(t); continue; }
+    const m = t.match(EYEBROW_IN) || t.match(/^말씀\s*묵상\s*자료(?=\s)/);
+    if (!m) { out.push(t); continue; }
+    const before = t.slice(0, m.index).trim(), rest = t.slice(m.index + m[0].length).trim();
+    if (before) out.push(before);
+    out.push("말씀 묵상 자료");
+    if (!rest) continue;
+    const dm = rest.match(/(?:\d{4}\s*년\s*)?\d{1,2}\s*월\s*\d{1,2}\s*일/);
+    const head = dm ? rest.slice(0, dm.index).trim() : rest, tail = dm ? rest.slice(dm.index).trim() : "";
+    const rm = head.match(new RegExp(REF_RE.source));
+    const ri = rm ? rm.index + (rm[1] || "").length : -1;
+    if (rm && onlyRef(head.slice(ri).trim())) {
+      const ti = head.slice(0, ri).trim();
+      if (ti) out.push(ti);
+      out.push(head.slice(ri).trim());
+    } else if (head) out.push(head);
+    if (tail) out.push(tail);
+  }
+  return out;
+}
+/* 예전 판으로 올린 말씀에는 기도문 끝에 다음 날 표지 글이 붙어 있을 수 있음 → 보여 줄 때·저장할 때 떼어 냄 */
+const stripCoverTail = (v) => {
+  if (typeof v !== "string" || v.indexOf("료") < 0) return v;
+  const m = v.match(/\s*말\s*씀\s*묵\s*상\s*자\s*료([\s\S]{0,260})$/);
+  return m && /\d{1,2}\s*월\s*\d{1,2}\s*일/.test(m[1]) ? v.slice(0, m.index).trim() : v;
+};
+const cleanWord = (w) => {
+  if (!w || typeof w !== "object") return w;
+  const o = { ...w };
+  ["prayer", "guide", "commentary", "background"].forEach((k) => { if (typeof o[k] === "string") o[k] = stripCoverTail(o[k]); });
+  if (isEyebrow(o.title)) o.title = "";
+  return o;
+};
+function foldCovers(paras0) {
+  const paras = splitCoverParas(paras0);
   const out = [];
   for (let i = 0; i < paras.length; i++) {
     if (!isEyebrow(paras[i])) { out.push(paras[i]); continue; }
@@ -1594,7 +1634,7 @@ function MeditationApp({ user, profileName, onHome, onLogout }) {
       setWordErr(/relation|does not exist|schema cache/i.test(w.error.message || "")
         ? "오늘의 말씀 표가 아직 없습니다. Supabase SQL Editor에서 '묵상이음-오늘의말씀.sql'을 실행해 주세요."
         : "오늘의 말씀을 불러오지 못했습니다 — " + w.error.message);
-    } else { setWords(w.data || []); setWordErr(""); }
+    } else { setWords((Array.isArray(w.data) ? w.data : []).map(cleanWord)); setWordErr(""); }
     setErr("");
   };
 
